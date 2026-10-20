@@ -5,7 +5,7 @@ pub mod shell;
 
 #[cfg(test)]
 mod tests {
-    use super::apps::built_in_apps;
+    use super::apps::{built_in_apps, parse_catalog};
     use super::shell::{Key, Screen, Shell};
 
     fn shell() -> Shell {
@@ -19,9 +19,54 @@ mod tests {
     }
 
     #[test]
+    fn built_in_apps_have_stable_ids() {
+        let ids: Vec<_> = built_in_apps().into_iter().map(|app| app.id).collect();
+        assert_eq!(ids, ["youtube", "spotify", "netflix"]);
+    }
+
+    fn catalog(ids: &[&str]) -> String {
+        ids.iter()
+            .map(|id| {
+                format!(
+                    "[[app]]
+id = \"{id}\"
+name = \"N\"
+icon = \"i\"
+start_url = \"https://x\"
+"
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_duplicate_id_is_rejected() {
+        assert!(parse_catalog(&catalog(&["a", "b"])).is_ok());
+        assert!(parse_catalog(&catalog(&["a", "b", "a"])).is_err());
+    }
+
+    #[test]
+    fn an_id_that_is_not_a_lowercase_slug_is_rejected() {
+        for id in ["", "YouTube", "you tube", "-a", "a-", "a--b", "a_b"] {
+            assert!(parse_catalog(&catalog(&[id])).is_err(), "{id:?} should be rejected");
+        }
+        assert!(parse_catalog(&catalog(&["you-tube2"])).is_ok());
+    }
+
+    #[test]
+    fn a_missing_id_is_rejected() {
+        let no_id = "[[app]]
+name = \"N\"
+icon = \"i\"
+start_url = \"https://x\"
+";
+        assert!(parse_catalog(no_id).is_err());
+    }
+
+    #[test]
     fn starts_on_home_with_the_first_tile_focused() {
         let shell = shell();
-        assert_eq!(shell.screen(), Screen::Home);
+        assert_eq!(shell.screen(), &Screen::Home);
         assert_eq!(shell.focused(), 0);
     }
 
@@ -59,7 +104,7 @@ mod tests {
         let mut shell = shell();
         shell.press(Key::Right);
         shell.press(Key::Enter);
-        assert_eq!(shell.screen(), Screen::App(1));
+        assert_eq!(shell.screen(), &Screen::App("spotify".into()));
     }
 
     #[test]
@@ -68,7 +113,7 @@ mod tests {
         shell.press(Key::Enter);
         shell.press(Key::Right);
         shell.press(Key::Enter);
-        assert_eq!(shell.screen(), Screen::App(0));
+        assert_eq!(shell.screen(), &Screen::App("youtube".into()));
         assert_eq!(shell.focused(), 0);
     }
 
@@ -79,7 +124,7 @@ mod tests {
             shell.press(Key::Right);
             shell.press(Key::Enter);
             shell.press(key);
-            assert_eq!(shell.screen(), Screen::Home);
+            assert_eq!(shell.screen(), &Screen::Home);
             assert_eq!(shell.focused(), 1);
         }
     }
@@ -89,7 +134,7 @@ mod tests {
         let mut shell = shell();
         shell.press(Key::Back);
         shell.press(Key::Home);
-        assert_eq!(shell.screen(), Screen::Home);
+        assert_eq!(shell.screen(), &Screen::Home);
         assert_eq!(shell.focused(), 0);
     }
 

@@ -34,10 +34,10 @@ impl Render for ShellView {
             .bg(rgb(0x101418))
             .text_color(rgb(0xffffff));
 
-        match self.shell.screen() {
-            Screen::Home => root.child(div().text_3xl().child("m4TV")).child(
-                div().flex().gap_6().children(self.shell.apps().iter().enumerate().map(
-                    |(i, app)| {
+        match self.shell.screen().clone() {
+            Screen::Home => {
+                root.child(div().text_3xl().child("m4TV")).child(div().flex().gap_6().children(
+                    self.shell.apps().iter().enumerate().map(|(i, app)| {
                         let focused = i == self.shell.focused();
                         div()
                             .w(px(240.))
@@ -51,12 +51,16 @@ impl Render for ShellView {
                             .bg(if focused { rgb(0x2a323c) } else { rgb(0x1a2028) })
                             .text_2xl()
                             .child(app.name.clone())
-                    },
-                )),
-            ),
+                    }),
+                ))
+            }
             // The Engine arrives with the CEF ticket; until then an opened App is a placeholder.
-            Screen::App(i) => root
-                .child(div().text_3xl().child(self.shell.apps()[i].name.clone()))
+            Screen::App(id) => root
+                .child(
+                    div().text_3xl().child(
+                        self.shell.app(&id).expect("open App is in the catalogue").name.clone(),
+                    ),
+                )
                 .child(div().text_color(rgb(0x8a96a3)).child("Esc or Home to go back")),
         }
     }

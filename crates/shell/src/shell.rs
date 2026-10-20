@@ -31,11 +31,11 @@ impl Key {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Screen {
     Home,
-    /// The App at this index is open.
-    App(usize),
+    /// The App with this id is open.
+    App(String),
 }
 
 pub struct Shell {
@@ -53,8 +53,12 @@ impl Shell {
         &self.apps
     }
 
-    pub fn screen(&self) -> Screen {
-        self.screen
+    pub fn screen(&self) -> &Screen {
+        &self.screen
+    }
+
+    pub fn app(&self, id: &str) -> Option<&AppDefinition> {
+        self.apps.iter().find(|app| app.id == id)
     }
 
     /// Index of the focused tile on Home.
@@ -74,7 +78,11 @@ impl Shell {
         match key {
             Key::Left => self.focused = self.focused.saturating_sub(1),
             Key::Right => self.focused = (self.focused + 1).min(self.apps.len().saturating_sub(1)),
-            Key::Enter => self.screen = Screen::App(self.focused),
+            Key::Enter => {
+                if let Some(app) = self.apps.get(self.focused) {
+                    self.screen = Screen::App(app.id.clone());
+                }
+            }
             _ => {}
         }
     }
