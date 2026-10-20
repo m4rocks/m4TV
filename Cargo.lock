@@ -2576,6 +2576,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "m4tv-os"
+version = "0.1.0"
+
+[[package]]
 name = "m4tv-shell"
 version = "0.1.0"
 dependencies = [

@@ -1,9 +1,12 @@
-[package]
-name = "m4tv-shell"
+[workspace]
+members = ["crates/*"]
+resolver = "3"
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
 
-[dependencies]
+[workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 # Third-party weekly snapshot of Zed's gpui: pinned exactly, bumped deliberately.
