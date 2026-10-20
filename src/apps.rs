@@ -18,9 +18,8 @@ pub struct AppDefinition {
 
 /// TV tuning flags. Spatial navigation is on unless an App turns it off (#13).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(default, deny_unknown_fields)]
 pub struct TvTuning {
-    #[serde(default = "yes")]
     pub spatial_nav: bool,
 }
 
@@ -28,10 +27,6 @@ impl Default for TvTuning {
     fn default() -> Self {
         Self { spatial_nav: true }
     }
-}
-
-fn yes() -> bool {
-    true
 }
 
 #[derive(Deserialize)]
