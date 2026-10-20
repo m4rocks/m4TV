@@ -8,9 +8,10 @@ use m4tv_settings::{Kind, SETTINGS, SettingDef, Settings, Value};
 use crate::{
     apps::AppDefinition,
     engine::{Engine, Frame},
+    remote::{AppSummary, Command, LiveState, Phone, Remote},
 };
 
-/// A TV-remote key. The dev-host keyboard and, later, the Remote both produce these.
+/// A TV-remote key. The Dev host keyboard and the Remote both produce these.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Key {
     Up,
@@ -23,11 +24,14 @@ pub enum Key {
     VolumeUp,
     VolumeDown,
     Mute,
+    PlayPause,
+    NextTrack,
+    PreviousTrack,
 }
 
 impl Key {
     /// The Windows virtual-key code a page sees for this key. Back, Home and the volume keys
-    /// belong to the Shell.
+    /// belong to the Shell; media keys go to the page.
     pub fn windows_key_code(self) -> Option<i32> {
         Some(match self {
             Key::Left => 0x25,
@@ -35,7 +39,31 @@ impl Key {
             Key::Right => 0x27,
             Key::Down => 0x28,
             Key::Enter => 0x0D,
+            Key::PlayPause => 0xB3,
+            Key::NextTrack => 0xB0,
+            Key::PreviousTrack => 0xB1,
             Key::Back | Key::Home | Key::VolumeUp | Key::VolumeDown | Key::Mute => return None,
+        })
+    }
+
+    /// Maps a browser `KeyboardEvent.code`, which is what the Remote sends for its d-pad and
+    /// media buttons.
+    pub fn from_code(code: &str) -> Option<Key> {
+        Some(match code {
+            "ArrowUp" => Key::Up,
+            "ArrowDown" => Key::Down,
+            "ArrowLeft" => Key::Left,
+            "ArrowRight" => Key::Right,
+            "Enter" | "NumpadEnter" => Key::Enter,
+            "Escape" | "BrowserBack" => Key::Back,
+            "Home" | "BrowserHome" => Key::Home,
+            "AudioVolumeUp" => Key::VolumeUp,
+            "AudioVolumeDown" => Key::VolumeDown,
+            "AudioVolumeMute" => Key::Mute,
+            "MediaPlayPause" => Key::PlayPause,
+            "MediaTrackNext" => Key::NextTrack,
+            "MediaTrackPrevious" => Key::PreviousTrack,
+            _ => return None,
         })
     }
 
@@ -64,7 +92,17 @@ pub const OVERLAY_TIME: Duration = Duration::from_secs(2);
 /// Shell interface drawn over whatever screen is up, an App included.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Overlay {
-    Volume { level: i64, muted: bool },
+    Volume {
+        level: i64,
+        muted: bool,
+    },
+    /// How to pair a phone: scan the QR code `payload`, or type `pin`. `cert_replaced` says the
+    /// TV's certificate changed, so phones that were paired must pair again.
+    Pairing {
+        pin: String,
+        payload: String,
+        cert_replaced: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,20 +113,35 @@ pub enum Screen {
     Settings,
 }
 
-/// A line on the Settings screen: every declared setting, then the device actions.
-#[derive(Clone, Copy)]
+/// A line on the Settings screen: every declared setting, the Remote's phones, then the device
+/// actions.
+#[derive(Clone)]
 pub enum Row {
     Setting(&'static SettingDef),
+    /// Shows the Pairing Overlay.
+    Pair,
+    /// A paired phone; Enter unpairs it.
+    Phone(Phone),
     Reboot,
     PowerOff,
 }
 
 impl Row {
-    pub fn label(&self) -> &'static str {
+    pub fn label(&self) -> String {
         match self {
-            Row::Setting(def) => def.label,
-            Row::Reboot => "Reboot",
-            Row::PowerOff => "Power off",
+            Row::Setting(def) => def.label.into(),
+            Row::Pair => "Pair a phone".into(),
+            Row::Phone(phone) => phone.name.clone(),
+            Row::Reboot => "Reboot".into(),
+            Row::PowerOff => "Power off".into(),
+        }
+    }
+
+    /// What the row shows beside its label when it is not a setting's value.
+    pub fn hint(&self) -> &'static str {
+        match self {
+            Row::Phone(_) => "Enter to unpair",
+            _ => "",
         }
     }
 }
@@ -102,8 +155,13 @@ pub struct Shell {
     focused: usize,
     settings_focused: usize,
     notice: Option<String>,
-    /// The Overlay showing, and how long it has left.
+    /// The Overlay showing, and how long it has left. A Pairing Overlay has no time limit.
     overlay: Option<(Overlay, Duration)>,
+    remote: Option<Remote>,
+    /// Settings asked for the Pairing Overlay, which then stays until Back or a Pairing.
+    pairing_requested: bool,
+    /// How many phones were paired when the Shell last looked.
+    phones_seen: usize,
 }
 
 impl Shell {
@@ -119,7 +177,17 @@ impl Shell {
             settings_focused: 0,
             notice: None,
             overlay: None,
+            remote: None,
+            pairing_requested: false,
+            phones_seen: 0,
         }
+    }
+
+    /// Starts taking commands from phones.
+    pub fn attach_remote(&mut self, remote: Remote) {
+        self.phones_seen = remote.pairings().phones().len();
+        self.remote = Some(remote);
+        self.sync_remote();
     }
 
     pub fn apps(&self) -> &[AppDefinition] {
@@ -140,7 +208,14 @@ impl Shell {
     }
 
     pub fn settings_rows(&self) -> Vec<Row> {
-        SETTINGS.iter().map(Row::Setting).chain([Row::Reboot, Row::PowerOff]).collect()
+        let phones = self.remote.iter().flat_map(|r| r.pairings().phones());
+        SETTINGS
+            .iter()
+            .map(Row::Setting)
+            .chain(self.remote.iter().map(|_| Row::Pair))
+            .chain(phones.map(Row::Phone))
+            .chain([Row::Reboot, Row::PowerOff])
+            .collect()
     }
 
     pub fn settings_focused(&self) -> usize {
@@ -166,13 +241,116 @@ impl Shell {
         self.overlay = None;
     }
 
-    /// Lets time pass: an Overlay dismisses itself once its wait is over.
-    pub fn tick(&mut self, elapsed: Duration) {
-        if let Some((_, left)) = &mut self.overlay {
+    /// Lets time pass: an Overlay dismisses itself once its wait is over, and phones get their
+    /// turn. Returns whether anything on screen may have changed.
+    pub fn tick(&mut self, elapsed: Duration) -> bool {
+        let before = self.overlay.clone();
+        if let Some((overlay, left)) = &mut self.overlay
+            && !matches!(overlay, Overlay::Pairing { .. })
+        {
             *left = left.saturating_sub(elapsed);
             if left.is_zero() {
                 self.overlay = None;
             }
+        }
+        let commanded = self.run_remote_commands();
+        self.sync_remote();
+        commanded || self.overlay != before
+    }
+
+    fn run_remote_commands(&mut self) -> bool {
+        let mut ran = false;
+        while let Some(command) = self.remote.as_mut().and_then(Remote::next_command) {
+            ran = true;
+            match command {
+                Command::Key(key) => self.press(key),
+                Command::Launch(id) => self.launch(&id),
+                Command::Order(ids) => self.reorder(&ids),
+                Command::Text(text) => {
+                    if self.editable_focused() {
+                        self.engine.type_text(&text);
+                    }
+                }
+            }
+        }
+        ran
+    }
+
+    fn editable_focused(&self) -> bool {
+        matches!(self.screen, Screen::App(_)) && self.engine.editable_focused()
+    }
+
+    /// Opens an App by id, closing the one that is open.
+    fn launch(&mut self, id: &str) {
+        let Some(app) = self.apps.iter().find(|app| app.id == id) else { return };
+        if matches!(self.screen, Screen::App(_)) {
+            self.engine.close();
+        }
+        self.engine.open(app);
+        self.screen = Screen::App(app.id.clone());
+    }
+
+    /// Puts the Apps in the order of `ids`, keeping the focus on the same tile.
+    fn reorder(&mut self, ids: &[String]) {
+        let focused = self.apps.get(self.focused).map(|app| app.id.clone());
+        self.apps.sort_by_key(|app| ids.iter().position(|id| *id == app.id));
+        if let Some(id) = focused {
+            self.focused = self.apps.iter().position(|app| app.id == id).unwrap_or(0);
+        }
+    }
+
+    /// Keeps the Pairing Overlay, the phone count and the Remote's view of the Shell current.
+    fn sync_remote(&mut self) {
+        let Some(remote) = &self.remote else { return };
+        let phones = remote.pairings().phones().len();
+        if phones > self.phones_seen {
+            self.pairing_requested = false;
+        }
+        self.phones_seen = phones;
+        // Nobody has the Remote open: show how to pair, except over a playing App.
+        let wanted = self.pairing_requested
+            || (remote.connections() == 0 && !matches!(self.screen, Screen::App(_)));
+        if wanted {
+            let pin = remote.pairings().pin();
+            let overlay = Overlay::Pairing {
+                payload: remote.pairing_link(&pin),
+                cert_replaced: remote.cert_replaced() && phones == 0,
+                pin,
+            };
+            self.overlay = Some((overlay, Duration::MAX));
+        } else if matches!(self.overlay, Some((Overlay::Pairing { .. }, _))) {
+            self.overlay = None;
+            remote.pairings().cancel();
+        }
+        remote.publish(self.live_state());
+    }
+
+    fn live_state(&self) -> LiveState {
+        let (screen, app, focus) = match &self.screen {
+            Screen::Home => ("home", None, self.focused),
+            Screen::App(id) => ("app", Some(id.clone()), 0),
+            Screen::Settings => ("settings", None, self.settings_focused),
+        };
+        LiveState {
+            screen,
+            app,
+            focus,
+            apps: self
+                .apps
+                .iter()
+                .map(|app| AppSummary { id: app.id.clone(), name: app.name.clone() })
+                .collect(),
+            volume: self.number("volume"),
+            muted: self.number("mute") != 0,
+            editable: self.editable_focused(),
+        }
+    }
+
+    /// A setting as a number, a toggle being 0 or 1.
+    fn number(&self, key: &str) -> i64 {
+        match self.settings.get(key) {
+            Value::Int(n) => n,
+            Value::Bool(on) => on as i64,
         }
     }
 
@@ -181,9 +359,18 @@ impl Shell {
     }
 
     pub fn press(&mut self, key: Key) {
+        self.dispatch(key);
+        self.sync_remote();
+    }
+
+    fn dispatch(&mut self, key: Key) {
         // Volume is the Shell's on every screen, so an open App never sees these keys.
         if let Key::VolumeUp | Key::VolumeDown | Key::Mute = key {
             return self.press_volume(key);
+        }
+        if key == Key::Back && self.pairing_requested {
+            self.pairing_requested = false;
+            return;
         }
         match self.screen {
             Screen::Home => self.press_home(key),
@@ -209,12 +396,12 @@ impl Shell {
             Key::VolumeDown => self.adjust("volume", -1),
             _ => self.adjust("mute", 1),
         }
-        let number = |key| match self.settings.get(key) {
-            Value::Int(n) => n,
-            Value::Bool(on) => on as i64,
-        };
-        let overlay = Overlay::Volume { level: number("volume"), muted: number("mute") != 0 };
-        self.overlay = Some((overlay, OVERLAY_TIME));
+        // Pairing is how a phone gets in, so a volume change does not cover it.
+        if !matches!(self.overlay, Some((Overlay::Pairing { .. }, _))) {
+            let overlay =
+                Overlay::Volume { level: self.number("volume"), muted: self.number("mute") != 0 };
+            self.overlay = Some((overlay, OVERLAY_TIME));
+        }
     }
 
     /// Steps a setting and stores it, saying so if it could not be stored.
@@ -255,6 +442,15 @@ impl Shell {
         }
     }
 
+    fn revoke(&mut self, id: u64) {
+        let Some(remote) = &self.remote else { return };
+        if let Err(e) = remote.pairings().revoke(id) {
+            self.notice = Some(format!("Could not save paired phones: {e}"));
+        }
+        let rows = self.settings_rows().len();
+        self.settings_focused = self.settings_focused.min(rows - 1);
+    }
+
     fn press_settings(&mut self, key: Key) {
         self.notice = None;
         let rows = self.settings_rows();
@@ -263,10 +459,13 @@ impl Shell {
             Key::Up => self.settings_focused = self.settings_focused.saturating_sub(1),
             Key::Down => self.settings_focused = (self.settings_focused + 1).min(rows.len() - 1),
             Key::VolumeUp | Key::VolumeDown | Key::Mute => {} // handled in press
-            Key::Left | Key::Right | Key::Enter => match rows[self.settings_focused] {
+            Key::PlayPause | Key::NextTrack | Key::PreviousTrack => {}
+            Key::Left | Key::Right | Key::Enter => match rows[self.settings_focused].clone() {
                 Row::Setting(def) if key != Key::Enter || matches!(def.kind, Kind::Toggle) => {
                     self.adjust(def.key, if key == Key::Left { -1 } else { 1 });
                 }
+                Row::Pair if key == Key::Enter => self.pairing_requested = true,
+                Row::Phone(phone) if key == Key::Enter => self.revoke(phone.id),
                 Row::Reboot if key == Key::Enter => self.notice = Some(self.os.reboot()),
                 Row::PowerOff if key == Key::Enter => self.notice = Some(self.os.power_off()),
                 _ => {}

@@ -2,6 +2,7 @@
 
 pub mod apps;
 pub mod engine;
+pub mod remote;
 pub mod shell;
 
 #[cfg(test)]
@@ -72,6 +73,12 @@ mod tests {
         fn take_frame(&mut self) -> Option<super::engine::Frame> {
             None
         }
+
+        fn editable_focused(&self) -> bool {
+            false
+        }
+
+        fn type_text(&mut self, _text: &str) {}
     }
 
     fn shell_with(os: &FakeOs, engine: &FakeEngine) -> Shell {
@@ -551,5 +558,39 @@ start_url = \"https://x\"
         session.attach(first, "page");
         let (_, stale) = session.begin();
         assert_eq!(stale, Some("page"));
+    }
+
+    #[test]
+    fn an_editable_field_is_tracked_for_the_open_session_only() {
+        let mut session = Session::<&str>::default();
+        let (first, _) = session.begin();
+        session.set_editable(first, true);
+        assert!(session.editable());
+        session.end();
+        assert!(!session.editable(), "closing the App clears it");
+        session.set_editable(first, true);
+        assert!(!session.editable(), "a late callback from the old session is refused");
+    }
+
+    #[test]
+    fn remote_key_codes_map_to_keys() {
+        let cases = [
+            ("ArrowLeft", Key::Left),
+            ("ArrowUp", Key::Up),
+            ("Enter", Key::Enter),
+            ("Escape", Key::Back),
+            ("Home", Key::Home),
+            ("AudioVolumeMute", Key::Mute),
+            ("MediaPlayPause", Key::PlayPause),
+            ("MediaTrackNext", Key::NextTrack),
+            ("MediaTrackPrevious", Key::PreviousTrack),
+        ];
+        for (code, key) in cases {
+            assert_eq!(Key::from_code(code), Some(key), "{code}");
+        }
+        assert_eq!(Key::from_code("KeyA"), None);
+        // Media keys reach the page; Back, Home and volume stay with the Shell.
+        assert_eq!(Key::PlayPause.windows_key_code(), Some(0xB3));
+        assert_eq!(Key::Home.windows_key_code(), None);
     }
 }
