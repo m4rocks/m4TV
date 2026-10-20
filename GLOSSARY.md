@@ -6,7 +6,15 @@ A custom Raspberry Pi operating system that boots straight into a TV-optimised i
 
 **Shell**:
 The TV-optimised interface m4TV boots into. It launches Apps and holds every setting.
-_Avoid_: Launcher, home screen, UI
+_Avoid_: Launcher, UI
+
+**Home**:
+The Shell's screen of App tiles, and the first thing shown. The Home key always returns to it from an App.
+_Avoid_: Home screen, main menu, launcher
+
+**Tile**:
+The focusable entry on Home: one per App, plus one for Settings. Settings is not an App.
+_Avoid_: Card, icon, shortcut
 
 **App**:
 A web service (such as YouTube, Spotify or Netflix) that m4TV presents as a TV application.
