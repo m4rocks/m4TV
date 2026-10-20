@@ -19,6 +19,10 @@ pub trait Engine {
     fn go_back(&mut self);
     /// The newest frame since the last call, if the page has painted.
     fn take_frame(&mut self) -> Option<Frame>;
+    /// Whether an editable field has the focus in the open App's page.
+    fn editable_focused(&self) -> bool;
+    /// Types `text` into the focused field in one go.
+    fn type_text(&mut self, text: &str);
 }
 
 /// An Engine that shows nothing, for hosts that have no web engine to run.
@@ -35,6 +39,10 @@ impl Engine for NoEngine {
     fn take_frame(&mut self) -> Option<Frame> {
         None
     }
+    fn editable_focused(&self) -> bool {
+        false
+    }
+    fn type_text(&mut self, _text: &str) {}
 }
 
 /// What an Engine tracks for the App that is open. The browser is created asynchronously and its
@@ -45,11 +53,12 @@ pub struct Session<B> {
     open: bool,
     browser: Option<B>,
     frame: Option<Frame>,
+    editable: bool,
 }
 
 impl<B> Default for Session<B> {
     fn default() -> Self {
-        Self { current: 0, open: false, browser: None, frame: None }
+        Self { current: 0, open: false, browser: None, frame: None, editable: false }
     }
 }
 
@@ -66,6 +75,7 @@ impl<B> Session<B> {
     pub fn end(&mut self) -> Option<B> {
         self.open = false;
         self.frame = None;
+        self.editable = false;
         self.browser.take()
     }
 
@@ -84,6 +94,17 @@ impl<B> Session<B> {
         if self.open && session == self.current {
             self.frame = Some(frame);
         }
+    }
+
+    /// Records whether the page has an editable field focused, for the open session only.
+    pub fn set_editable(&mut self, session: u64, editable: bool) {
+        if self.open && session == self.current {
+            self.editable = editable;
+        }
+    }
+
+    pub fn editable(&self) -> bool {
+        self.editable
     }
 
     pub fn browser(&self) -> Option<&B> {

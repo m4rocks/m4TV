@@ -4,6 +4,7 @@
 mod cef_engine;
 
 use std::{
+    path::Path,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -17,6 +18,7 @@ use m4tv_os::FakeOs;
 use m4tv_shell::{
     apps::built_in_apps,
     engine::{Engine, Frame},
+    remote::Remote,
     shell::{Key, Overlay, Row, Screen, Shell},
 };
 
@@ -96,7 +98,7 @@ impl Render for ShellView {
                     let focused = i == self.shell.settings_focused();
                     let value = match row {
                         Row::Setting(def) => self.shell.setting_text(def.key),
-                        Row::Reboot | Row::PowerOff => String::new(),
+                        _ => row.hint().to_string(),
                     };
                     div()
                         .w(px(480.))
@@ -152,9 +154,52 @@ impl Render for ShellView {
                     .border_color(rgb(0x2a323c))
                     .text_2xl()
                     .child(if *muted { "Muted".to_string() } else { format!("Volume {level}") }),
+                Overlay::Pairing { pin, payload, cert_replaced } => {
+                    let code = qrcode::QrCode::new(payload.as_bytes())
+                        .expect("a pairing link fits in a QR code");
+                    let width = code.width();
+                    let modules = code.to_colors();
+                    let rows = modules.chunks(width).map(|row| {
+                        div().flex().children(row.iter().map(|module| {
+                            let dark = *module == qrcode::Color::Dark;
+                            div().size(px(6.)).bg(if dark { rgb(0x000000) } else { rgb(0xffffff) })
+                        }))
+                    });
+                    div()
+                        .absolute()
+                        .right(px(32.))
+                        .bottom(px(32.))
+                        .p_6()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .gap_3()
+                        .rounded_lg()
+                        .bg(rgb(0x1a2028))
+                        .border_2()
+                        .border_color(rgb(0x2a323c))
+                        .child(div().text_xl().child("Pair your phone"))
+                        .child(div().p_3().bg(rgb(0xffffff)).flex().flex_col().children(rows))
+                        .child(div().text_2xl().child(format!("PIN {pin}")))
+                        .children(cert_replaced.then(|| {
+                            div()
+                                .text_color(rgb(0xf0b429))
+                                .child("This TV's certificate changed: pair your phones again")
+                        }))
+                }
             }
         }))
     }
+}
+
+/// The Dev host's Shell, with its Remote server. Without a Remote it still runs.
+fn dev_host_shell(engine: Box<dyn Engine>) -> Shell {
+    let mut shell = Shell::new(built_in_apps(), Box::new(FakeOs::dev_host()), engine);
+    match Remote::start(&Path::new(".m4tv-dev").join("remote"), 8443, true) {
+        Ok(remote) => shell.attach_remote(remote),
+        Err(e) => eprintln!("Remote server not started: {e}"),
+    }
+    shell
 }
 
 fn main() {
@@ -171,15 +216,7 @@ fn main() {
                     cx.new(|cx| {
                         let focus = cx.focus_handle();
                         window.focus(&focus, cx);
-                        ShellView {
-                            shell: Shell::new(
-                                built_in_apps(),
-                                Box::new(FakeOs::dev_host()),
-                                engine,
-                            ),
-                            focus,
-                            page: None,
-                        }
+                        ShellView { shell: dev_host_shell(engine), focus, page: None }
                     })
                 },
             )
@@ -194,10 +231,9 @@ fn main() {
                 #[cfg(feature = "cef")]
                 cef_engine::pump();
                 let _ = window.update(cx, |view, _window, cx| {
-                    let overlay_was_up = view.shell.overlay().is_some();
-                    view.shell.tick(elapsed);
-                    // Redraw while an App plays, and once more when an Overlay goes away.
-                    if matches!(view.shell.screen(), Screen::App(_)) || overlay_was_up {
+                    // Redraw while an App plays, and when a tick changed anything else.
+                    let changed = view.shell.tick(elapsed);
+                    if matches!(view.shell.screen(), Screen::App(_)) || changed {
                         cx.notify();
                     }
                 });

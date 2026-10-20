@@ -56,6 +56,17 @@ wrap_render_handler! {
             let frame = Frame { width: width as u32, height: height as u32, bgra: bgra.to_vec() };
             self.shared.lock().unwrap().paint(self.session, frame);
         }
+
+        // Chromium asks for an on-screen keyboard when an editable field takes the focus, and to
+        // hide it when the field loses it: that is when the Remote shows its text box.
+        fn on_virtual_keyboard_requested(
+            &self,
+            _browser: Option<&mut Browser>,
+            input_mode: TextInputMode,
+        ) {
+            let editable = input_mode != TextInputMode::NONE;
+            self.shared.lock().unwrap().set_editable(self.session, editable);
+        }
     }
 }
 
@@ -259,5 +270,18 @@ impl Engine for CefEngine {
 
     fn take_frame(&mut self) -> Option<Frame> {
         self.shared.lock().unwrap().take_frame()
+    }
+
+    fn editable_focused(&self) -> bool {
+        self.shared.lock().unwrap().editable()
+    }
+
+    fn type_text(&mut self, text: &str) {
+        if let Some(host) = self.shared.lock().unwrap().browser().and_then(|b| b.host()) {
+            // Committing the text at once, as an input method does: an invalid range means
+            // "insert at the cursor".
+            let at_cursor = Range { from: u32::MAX, to: u32::MAX };
+            host.ime_commit_text(Some(&text.into()), Some(&at_cursor), 0);
+        }
     }
 }
