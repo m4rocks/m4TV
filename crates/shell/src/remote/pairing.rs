@@ -82,10 +82,6 @@ fn random_digits(digits: usize) -> String {
     bytes.iter().map(|b| char::from(b'0' + b % 10)).collect()
 }
 
-fn random_token() -> String {
-    random_hex(32)
-}
-
 fn random_hex(bytes: usize) -> String {
     let mut buffer = vec![0u8; bytes];
     getrandom::fill(&mut buffer).expect("the OS has randomness");
@@ -141,10 +137,15 @@ impl Inner {
             self.phones.pop();
             return Err(PairError::Save(e));
         }
+        self.end_offer();
+        Ok(())
+    }
+
+    /// The PIN and the secret are no longer on screen, or have done their job.
+    fn end_offer(&mut self) {
         self.offer = None;
         self.challenges.clear();
         self.tries = 0;
-        Ok(())
     }
 
     fn save(&self) -> io::Result<()> {
@@ -187,10 +188,7 @@ impl Pairings {
 
     /// Stops accepting the PIN and the secret, because the TV no longer shows them.
     pub fn cancel(&self) {
-        let mut inner = self.0.lock().unwrap();
-        inner.offer = None;
-        inner.challenges.clear();
-        inner.tries = 0;
+        self.0.lock().unwrap().end_offer();
     }
 
     /// Pairs a phone that knows the PIN on screen and returns its token.
@@ -204,7 +202,7 @@ impl Pairings {
             Some(_) => return Err(inner.wrong()),
             None => return Err(PairError::WrongPin),
         }
-        let token = random_token();
+        let token = random_hex(32);
         inner.pair(name, token.clone())?;
         Ok(token)
     }
@@ -239,18 +237,19 @@ impl Pairings {
         }
         let Some(offer) = &inner.offer else { return Err(PairError::WrongPin) };
         let secret = offer.secret;
-        let asked = inner.challenges.iter().position(|c| c == challenge);
+        // A challenge this TV never handed out (or already used) guesses nothing, so it costs no
+        // try: otherwise anyone on the network could burn a phone's tries by evicting its challenge.
+        let Some(asked) = inner.challenges.iter().position(|c| c == challenge) else {
+            return Err(PairError::WrongPin);
+        };
+        inner.challenges.remove(asked);
         let proven = nonce.len() <= 64
             && unhex(proof).is_some_and(|proof| {
                 mac(&secret, "phone", challenge, nonce).verify_slice(&proof).is_ok()
             });
-        let Some(asked) = asked.filter(|_| proven) else {
-            if let Some(asked) = asked {
-                inner.challenges.remove(asked);
-            }
+        if !proven {
             return Err(inner.wrong());
-        };
-        inner.challenges.remove(asked);
+        }
         let token = hex(&mac(&secret, "token", challenge, nonce).finalize().into_bytes());
         inner.pair(name, token)?;
         Ok(hex(&mac(&secret, "tv", challenge, nonce).finalize().into_bytes()))

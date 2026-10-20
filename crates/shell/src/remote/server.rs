@@ -68,7 +68,7 @@ pub(super) fn router(shared: Shared) -> Router {
         .route("/api/pair/prove", post(prove))
         .route("/api/ws", get(ws))
         .nest("/api", api)
-        .fallback(web)
+        .fallback_service(get(web))
         .with_state(shared)
 }
 
@@ -116,10 +116,15 @@ struct PairRequest {
     name: String,
 }
 
+/// What a phone is called in Settings.
+fn phone_name(requested: &str) -> String {
+    let name = requested.trim().chars().take(40).collect::<String>();
+    if name.is_empty() { "Phone".to_string() } else { name }
+}
+
 async fn pair(State(shared): State<Shared>, Json(request): Json<PairRequest>) -> Response {
-    let name = request.name.trim().chars().take(40).collect::<String>();
-    let name = if name.is_empty() { "Phone" } else { &name };
-    match shared.pairings.redeem(&request.pin, name) {
+    let name = phone_name(&request.name);
+    match shared.pairings.redeem(&request.pin, &name) {
         Ok(token) => Json(json!({ "token": token })).into_response(),
         Err(PairError::WrongPin) => refuse(StatusCode::FORBIDDEN, "wrong PIN"),
         Err(PairError::Save(_)) => {
@@ -145,9 +150,8 @@ struct ProveRequest {
 }
 
 async fn prove(State(shared): State<Shared>, Json(request): Json<ProveRequest>) -> Response {
-    let name = request.name.trim().chars().take(40).collect::<String>();
-    let name = if name.is_empty() { "Phone" } else { &name };
-    match shared.pairings.prove(&request.challenge, &request.nonce, &request.proof, name) {
+    let name = phone_name(&request.name);
+    match shared.pairings.prove(&request.challenge, &request.nonce, &request.proof, &name) {
         Ok(proof) => Json(json!({ "proof": proof })).into_response(),
         Err(PairError::WrongPin) => refuse(StatusCode::FORBIDDEN, "wrong secret"),
         Err(PairError::Save(_)) => {

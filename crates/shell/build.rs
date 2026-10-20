@@ -85,7 +85,7 @@ fn hash(paths: &[PathBuf]) -> String {
     files.sort();
     let mut hasher = DefaultHasher::new();
     for file in files {
-        file.file_name().hash(&mut hasher);
+        file.hash(&mut hasher);
         fs::read(&file).unwrap_or_default().hash(&mut hasher);
     }
     format!("{:016x}", hasher.finish())

@@ -494,6 +494,25 @@ fn a_replayed_proof_or_a_reused_secret_is_refused() {
 }
 
 #[test]
+fn proofs_for_challenges_the_tv_never_gave_do_not_burn_the_tries() {
+    let mut rig = Rig::new();
+    let api = rig.api();
+    let (_, payload) = rig.pairing();
+    let secret = fragment_field(&payload, "secret");
+    for _ in 0..10 {
+        let bogus = json!({"challenge": random_hex(), "nonce": "00", "proof": random_hex()});
+        assert_eq!(rig.drive(api.post("/api/pair/prove", None, bogus)).0, 403);
+    }
+    // Nobody was locked out and the secret is the one on screen.
+    let paired = rig.drive(pair_by_secret(
+        async |path, body| api.post(path, None, body).await,
+        &secret,
+        "Pixel",
+    ));
+    assert!(paired.is_ok());
+}
+
+#[test]
 fn a_client_catches_a_tv_that_does_not_know_the_secret() {
     let mut rig = Rig::new();
     let (_, payload) = rig.pairing();
@@ -570,6 +589,8 @@ fn the_remote_web_app_is_served_with_a_landing_page_that_needs_no_javascript() {
         assert_eq!((status, kind.as_str()), (200, wanted), "{file}");
     }
     assert_eq!(rig.drive(api.page("/nothing-here")).0, 404);
+    let post = rig.drive(api.post("/", None, json!({}))).0;
+    assert_eq!(post, 405, "the web app is read-only");
 }
 
 #[test]
