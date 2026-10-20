@@ -4,9 +4,10 @@ set windows-shell := ["powershell.exe", "-NoLogo", "-Command"]
 default:
     @just --list
 
-# Run the Shell (the Dev host on Windows).
+# Run the Shell with the Engine (the Dev host on Windows). The first build downloads CEF and
+# compiles its wrapper, so it needs cmake, ninja and MSVC on PATH: a Visual Studio developer shell.
 run:
-    cargo run -p m4tv-shell
+    cargo run -p m4tv-shell --features cef
 
 # Compile everything, as CI does.
 build:
