@@ -9,7 +9,7 @@ use std::{
 use cef::*;
 use m4tv_shell::{
     apps::AppDefinition,
-    engine::{Engine, Frame},
+    engine::{Engine, Frame, Session},
     shell::Key,
 };
 
@@ -17,15 +17,18 @@ use m4tv_shell::{
 // Pi build needs 1080p.
 const VIEW: (i32, i32) = (1280, 720);
 
-#[derive(Default)]
-struct Shared {
-    frame: Option<Frame>,
-    browser: Option<Browser>,
+type Shared = Arc<Mutex<Session<Browser>>>;
+
+fn close_browser(browser: Option<Browser>) {
+    if let Some(host) = browser.and_then(|b| b.host()) {
+        host.close_browser(1);
+    }
 }
 
 wrap_render_handler! {
     struct Render {
-        shared: Arc<Mutex<Shared>>,
+        shared: Shared,
+        session: u64,
     }
 
     impl RenderHandler {
@@ -49,21 +52,25 @@ wrap_render_handler! {
                 return;
             }
             let bgra = unsafe { std::slice::from_raw_parts(buffer, width as usize * height as usize * 4) };
-            // Replacing the frame drops the previous one, so nothing accumulates.
-            self.shared.lock().unwrap().frame =
-                Some(Frame { width: width as u32, height: height as u32, bgra: bgra.to_vec() });
+            // Painting replaces the previous frame, so nothing accumulates.
+            let frame = Frame { width: width as u32, height: height as u32, bgra: bgra.to_vec() };
+            self.shared.lock().unwrap().paint(self.session, frame);
         }
     }
 }
 
 wrap_life_span_handler! {
     struct LifeSpan {
-        shared: Arc<Mutex<Shared>>,
+        shared: Shared,
+        session: u64,
     }
 
     impl LifeSpanHandler {
         fn on_after_created(&self, browser: Option<&mut Browser>) {
-            self.shared.lock().unwrap().browser = browser.cloned();
+            let Some(browser) = browser.cloned() else { return };
+            // The App may have been closed while this browser was still being created.
+            let late = self.shared.lock().unwrap().attach(self.session, browser);
+            close_browser(late);
         }
     }
 }
@@ -92,7 +99,7 @@ wrap_app! {
 }
 
 pub struct CefEngine {
-    shared: Arc<Mutex<Shared>>,
+    shared: Shared,
     cache_root: PathBuf,
     /// One request context per App id: its own cookies and storage, kept on disk under the id.
     contexts: HashMap<String, RequestContext>,
@@ -128,7 +135,7 @@ pub fn start(cache_root: PathBuf) -> CefEngine {
         1,
         "CEF failed to start; is libcef.dll next to the executable or on PATH?"
     );
-    CefEngine { shared: Arc::default(), cache_root, contexts: HashMap::new() }
+    CefEngine { shared: Shared::default(), cache_root, contexts: HashMap::new() }
 }
 
 /// Lets CEF do its pending work; call on the thread that started it, many times a second.
@@ -151,8 +158,12 @@ impl Engine for CefEngine {
             };
             request_context_create_context(Some(&settings), None).expect("request context")
         });
-        let mut client =
-            AppClient::new(Render::new(self.shared.clone()), LifeSpan::new(self.shared.clone()));
+        let (session, stale) = self.shared.lock().unwrap().begin();
+        close_browser(stale);
+        let mut client = AppClient::new(
+            Render::new(self.shared.clone(), session),
+            LifeSpan::new(self.shared.clone(), session),
+        );
         let window_info = WindowInfo::default().set_as_windowless(Default::default());
         browser_host_create_browser(
             Some(&window_info),
@@ -165,17 +176,14 @@ impl Engine for CefEngine {
     }
 
     fn close(&mut self) {
-        let mut shared = self.shared.lock().unwrap();
-        if let Some(host) = shared.browser.take().and_then(|b| b.host()) {
-            host.close_browser(1);
-        }
-        shared.frame = None;
+        let browser = self.shared.lock().unwrap().end();
+        close_browser(browser);
     }
 
     fn key(&mut self, key: Key) {
         let Some(code) = key.windows_key_code() else { return };
         let shared = self.shared.lock().unwrap();
-        let Some(host) = shared.browser.as_ref().and_then(|b| b.host()) else { return };
+        let Some(host) = shared.browser().and_then(|b| b.host()) else { return };
         let event = |type_| KeyEvent {
             size: std::mem::size_of::<KeyEvent>(),
             type_,
@@ -195,16 +203,16 @@ impl Engine for CefEngine {
     }
 
     fn can_go_back(&self) -> bool {
-        self.shared.lock().unwrap().browser.as_ref().is_some_and(|b| b.can_go_back() != 0)
+        self.shared.lock().unwrap().browser().is_some_and(|b| b.can_go_back() != 0)
     }
 
     fn go_back(&mut self) {
-        if let Some(browser) = self.shared.lock().unwrap().browser.as_ref() {
+        if let Some(browser) = self.shared.lock().unwrap().browser() {
             browser.go_back();
         }
     }
 
     fn take_frame(&mut self) -> Option<Frame> {
-        self.shared.lock().unwrap().frame.take()
+        self.shared.lock().unwrap().take_frame()
     }
 }

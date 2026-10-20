@@ -7,7 +7,7 @@ pub mod shell;
 #[cfg(test)]
 mod tests {
     use super::apps::{built_in_apps, parse_catalog};
-    use super::engine::Engine;
+    use super::engine::{Engine, Session};
     use super::shell::{Key, Row, Screen, Shell};
     use m4tv_os::{FakeOs, Os, PowerAction};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -379,5 +379,69 @@ start_url = \"https://x\"
             "Back and Home are the Shell's, not the page's"
         );
         assert_eq!(Key::Home.windows_key_code(), None);
+    }
+
+    fn frame() -> super::engine::Frame {
+        super::engine::Frame { width: 1, height: 1, bgra: vec![0; 4] }
+    }
+
+    #[test]
+    fn a_browser_created_in_the_open_session_is_kept() {
+        let mut session = Session::default();
+        let (id, stale) = session.begin();
+        assert_eq!(stale, None);
+        assert_eq!(session.attach(id, "page"), None);
+        assert_eq!(session.browser(), Some(&"page"));
+    }
+
+    #[test]
+    fn a_browser_that_arrives_after_its_session_ended_is_handed_back_to_close() {
+        let mut session = Session::default();
+        let (id, _) = session.begin();
+        assert_eq!(session.end(), None, "nothing was created yet, so nothing to close");
+        assert_eq!(session.attach(id, "late"), Some("late"));
+        assert_eq!(session.browser(), None);
+    }
+
+    #[test]
+    fn a_frame_painted_after_the_session_ended_is_dropped() {
+        let mut session = Session::<&str>::default();
+        let (id, _) = session.begin();
+        session.paint(id, frame());
+        session.end();
+        session.paint(id, frame());
+        assert!(session.take_frame().is_none());
+    }
+
+    #[test]
+    fn ending_returns_the_browser_and_clears_its_frame() {
+        let mut session = Session::default();
+        let (id, _) = session.begin();
+        session.attach(id, "page");
+        session.paint(id, frame());
+        assert_eq!(session.end(), Some("page"));
+        assert!(session.take_frame().is_none());
+    }
+
+    #[test]
+    fn callbacks_from_an_earlier_session_cannot_touch_the_next_one() {
+        let mut session = Session::default();
+        let (first, _) = session.begin();
+        session.end();
+        let (second, _) = session.begin();
+        session.paint(first, frame());
+        assert!(session.take_frame().is_none());
+        assert_eq!(session.attach(first, "old"), Some("old"));
+        assert_eq!(session.attach(second, "new"), None);
+        assert_eq!(session.browser(), Some(&"new"));
+    }
+
+    #[test]
+    fn beginning_again_hands_back_a_browser_that_was_never_ended() {
+        let mut session = Session::default();
+        let (first, _) = session.begin();
+        session.attach(first, "page");
+        let (_, stale) = session.begin();
+        assert_eq!(stale, Some("page"));
     }
 }
