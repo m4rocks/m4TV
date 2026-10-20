@@ -6,9 +6,9 @@ pub mod shell;
 
 #[cfg(test)]
 mod tests {
-    use super::apps::{built_in_apps, parse_catalog};
+    use super::apps::{built_in_apps, page_script, parse_catalog};
     use super::engine::{Engine, Session};
-    use super::shell::{Key, Row, Screen, Shell};
+    use super::shell::{Key, OVERLAY_TIME, Overlay, Row, Screen, Shell};
     use m4tv_os::{FakeOs, Os, PowerAction};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -109,6 +109,40 @@ mod tests {
     fn built_in_apps_have_stable_ids() {
         let ids: Vec<_> = built_in_apps().into_iter().map(|app| app.id).collect();
         assert_eq!(ids, ["youtube", "spotify", "netflix"]);
+    }
+
+    #[test]
+    fn youtube_runs_youtube_tv_with_a_tv_user_agent_and_the_others_use_the_default() {
+        let apps = built_in_apps();
+        assert_eq!(apps[0].start_url, "https://www.youtube.com/tv");
+        assert!(apps[0].user_agent.as_deref().unwrap().contains("PlayStation"));
+        assert_eq!(apps[1].user_agent, None);
+        assert_eq!(apps[2].user_agent, None);
+    }
+
+    #[test]
+    fn every_app_gets_spatial_navigation_until_it_turns_it_off() {
+        let mut app = built_in_apps().remove(0);
+        assert!(page_script(&app).contains("m4tvSpatialNav"));
+        app.tv.spatial_nav = false;
+        assert!(!page_script(&app).contains("m4tvSpatialNav"));
+    }
+
+    #[test]
+    fn an_apps_own_css_and_js_are_injected_with_the_script() {
+        let mut app = built_in_apps().remove(0);
+        app.css = Some("body{zoom:1.5}".into());
+        app.js = Some("window.tuned=1;".into());
+        let script = page_script(&app);
+        assert!(script.contains("body{zoom:1.5}") && script.contains("window.tuned=1;"));
+    }
+
+    #[test]
+    fn css_with_quotes_and_newlines_stays_inside_its_js_string() {
+        let mut app = built_in_apps().remove(0);
+        app.tv.spatial_nav = false;
+        app.css = Some("a::after{content:'x\\'}\n".into());
+        assert!(page_script(&app).contains(r"'a::after{content:\'x\\\'}\n'"));
     }
 
     fn catalog(ids: &[&str]) -> String {
@@ -365,6 +399,80 @@ start_url = \"https://x\"
         shell.press(Key::Back);
         assert_eq!(shell.screen(), &Screen::Home);
         assert_eq!(engine.events(), ["open youtube", "back", "close"]);
+    }
+
+    #[test]
+    fn the_dev_host_keyboard_has_volume_keys() {
+        let mapped: Vec<_> = ["pageup", "pagedown", "m"].map(Key::from_keystroke).into();
+        assert_eq!(mapped, [Some(Key::VolumeUp), Some(Key::VolumeDown), Some(Key::Mute)]);
+    }
+
+    fn volume(level: i64, muted: bool) -> Option<Overlay> {
+        Some(Overlay::Volume { level, muted })
+    }
+
+    #[test]
+    fn a_volume_key_shows_an_overlay_over_a_playing_app_without_touching_it() {
+        let engine = FakeEngine::default();
+        let mut shell = shell_with(&fake_os(), &engine);
+        press(&mut shell, &[Key::Enter, Key::VolumeUp]);
+        assert_eq!(shell.overlay(), volume(55, false).as_ref());
+        assert_eq!(shell.screen(), &Screen::App("youtube".into()));
+        assert_eq!(engine.events(), ["open youtube"]);
+    }
+
+    #[test]
+    fn keys_still_reach_the_app_while_an_overlay_is_visible() {
+        let engine = FakeEngine::default();
+        let mut shell = shell_with(&fake_os(), &engine);
+        press(&mut shell, &[Key::Enter, Key::VolumeDown, Key::Right, Key::Enter]);
+        assert!(shell.overlay().is_some());
+        assert_eq!(engine.events(), ["open youtube", "key Right", "key Enter"]);
+    }
+
+    #[test]
+    fn mute_toggles_and_the_overlay_says_so() {
+        let mut shell = shell();
+        shell.press(Key::Mute);
+        assert_eq!(shell.overlay(), volume(50, true).as_ref());
+        shell.press(Key::Mute);
+        assert_eq!(shell.overlay(), volume(50, false).as_ref());
+    }
+
+    #[test]
+    fn volume_keys_change_the_stored_volume_from_any_screen() {
+        let os = fake_os();
+        let mut shell = shell_on(&os);
+        press(&mut shell, &[Key::VolumeDown, Key::VolumeDown]);
+        assert_eq!(shell_on(&os).setting_text("volume"), "40");
+    }
+
+    #[test]
+    fn the_overlay_dismisses_itself_and_a_new_press_restarts_the_wait() {
+        let mut shell = shell();
+        shell.press(Key::VolumeUp);
+        shell.tick(OVERLAY_TIME / 2);
+        shell.press(Key::VolumeUp);
+        shell.tick(OVERLAY_TIME / 2);
+        assert_eq!(shell.overlay(), volume(60, false).as_ref(), "the second press restarted it");
+        shell.tick(OVERLAY_TIME / 2);
+        assert_eq!(shell.overlay(), None);
+    }
+
+    #[test]
+    fn an_overlay_can_be_dismissed_on_request() {
+        let mut shell = shell();
+        shell.press(Key::VolumeUp);
+        shell.dismiss_overlay();
+        assert_eq!(shell.overlay(), None);
+    }
+
+    #[test]
+    fn a_dismissed_overlay_stays_dismissed_after_the_app_closes() {
+        let mut shell = shell();
+        press(&mut shell, &[Key::Enter, Key::VolumeUp, Key::Home]);
+        shell.tick(OVERLAY_TIME);
+        assert_eq!(shell.overlay(), None);
     }
 
     #[test]

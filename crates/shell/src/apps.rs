@@ -62,3 +62,30 @@ fn is_slug(id: &str) -> bool {
 pub fn built_in_apps() -> Vec<AppDefinition> {
     parse_catalog(include_str!("../data/apps.toml")).expect("data/apps.toml is valid")
 }
+
+/// What the Engine runs in every page of the App: spatial navigation (unless the App turns it
+/// off), then the App's own CSS and JS.
+pub fn page_script(app: &AppDefinition) -> String {
+    let mut script = String::new();
+    if app.tv.spatial_nav {
+        script += include_str!("../data/spatial_nav.js");
+    }
+    if let Some(css) = &app.css {
+        script += &format!(
+            "(document.head || document.documentElement).append(Object.assign(document.createElement('style'), {{ textContent: {} }}));\n",
+            js_string(css)
+        );
+    }
+    if let Some(js) = &app.js {
+        script += js;
+        script.push('\n');
+    }
+    script
+}
+
+/// A single-quoted JS string literal for `text`.
+fn js_string(text: &str) -> String {
+    let escaped =
+        text.replace('\\', "\\\\").replace('\'', "\\'").replace('\n', "\\n").replace('\r', "\\r");
+    format!("'{escaped}'")
+}
