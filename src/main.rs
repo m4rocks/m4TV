@@ -1,0 +1,84 @@
+//! The Shell. On Windows this is the Dev host: an ordinary window, a keyboard for the TV remote.
+
+use gpui::{
+    App, Bounds, Context, FocusHandle, KeyDownEvent, Window, WindowBounds, WindowOptions, div,
+    prelude::*, px, rgb, size,
+};
+use gpui_platform::application;
+use m4tv_shell::{
+    apps::built_in_apps,
+    shell::{Key, Screen, Shell},
+};
+
+struct ShellView {
+    shell: Shell,
+    focus: FocusHandle,
+}
+
+impl Render for ShellView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let root = div()
+            .track_focus(&self.focus)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+                if let Some(key) = Key::from_keystroke(&event.keystroke.key) {
+                    this.shell.press(key);
+                    cx.notify();
+                }
+            }))
+            .size_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap_8()
+            .bg(rgb(0x101418))
+            .text_color(rgb(0xffffff));
+
+        match self.shell.screen() {
+            Screen::Home => root.child(div().text_3xl().child("m4TV")).child(
+                div().flex().gap_6().children(self.shell.apps().iter().enumerate().map(
+                    |(i, app)| {
+                        let focused = i == self.shell.focused();
+                        div()
+                            .w(px(240.))
+                            .h(px(150.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_lg()
+                            .border_4()
+                            .border_color(if focused { rgb(0xffffff) } else { rgb(0x2a323c) })
+                            .bg(if focused { rgb(0x2a323c) } else { rgb(0x1a2028) })
+                            .text_2xl()
+                            .child(app.name.clone())
+                    },
+                )),
+            ),
+            // The Engine arrives with the CEF ticket; until then an opened App is a placeholder.
+            Screen::App(i) => root
+                .child(div().text_3xl().child(self.shell.apps()[i].name.clone()))
+                .child(div().text_color(rgb(0x8a96a3)).child("Esc or Home to go back")),
+        }
+    }
+}
+
+fn main() {
+    application().run(|cx: &mut App| {
+        let bounds = Bounds::centered(None, size(px(1280.), px(720.)), cx);
+        cx.open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                ..Default::default()
+            },
+            |window, cx| {
+                cx.new(|cx| {
+                    let focus = cx.focus_handle();
+                    window.focus(&focus, cx);
+                    ShellView { shell: Shell::new(built_in_apps()), focus }
+                })
+            },
+        )
+        .unwrap();
+        cx.activate(true);
+    });
+}

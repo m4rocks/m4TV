@@ -1,0 +1,16 @@
+# The built-in Apps. Declarative data only: no per-App code (#13).
+
+[[app]]
+name = "YouTube"
+icon = "youtube"
+start_url = "https://www.youtube.com/tv"
+
+[[app]]
+name = "Spotify"
+icon = "spotify"
+start_url = "https://open.spotify.com"
+
+[[app]]
+name = "Netflix"
+icon = "netflix"
+start_url = "https://www.netflix.com"
