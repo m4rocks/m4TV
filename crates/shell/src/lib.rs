@@ -1,11 +1,13 @@
 //! The Shell's UI-independent core: App definitions and the TV-remote navigation state.
 
 pub mod apps;
+pub mod engine;
 pub mod shell;
 
 #[cfg(test)]
 mod tests {
     use super::apps::{built_in_apps, parse_catalog};
+    use super::engine::Engine;
     use super::shell::{Key, Row, Screen, Shell};
     use m4tv_os::{FakeOs, Os, PowerAction};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -22,8 +24,62 @@ mod tests {
         FakeOs::new(dir.join("settings.toml"))
     }
 
+    /// An Engine that records what the Shell asks of it. Clones share one record.
+    #[derive(Clone, Default)]
+    struct FakeEngine(std::sync::Arc<std::sync::Mutex<Record>>);
+
+    #[derive(Default)]
+    struct Record {
+        events: Vec<String>,
+        history: bool,
+    }
+
+    impl FakeEngine {
+        fn events(&self) -> Vec<String> {
+            self.0.lock().unwrap().events.clone()
+        }
+
+        fn set_history(&self, history: bool) {
+            self.0.lock().unwrap().history = history;
+        }
+
+        fn log(&self, event: String) {
+            self.0.lock().unwrap().events.push(event);
+        }
+    }
+
+    impl Engine for FakeEngine {
+        fn open(&mut self, app: &super::apps::AppDefinition) {
+            self.log(format!("open {}", app.id));
+        }
+
+        fn close(&mut self) {
+            self.log("close".into());
+        }
+
+        fn key(&mut self, key: Key) {
+            self.log(format!("key {key:?}"));
+        }
+
+        fn can_go_back(&self) -> bool {
+            self.0.lock().unwrap().history
+        }
+
+        fn go_back(&mut self) {
+            self.log("back".into());
+        }
+
+        fn take_frame(&mut self) -> Option<super::engine::Frame> {
+            None
+        }
+    }
+
+    fn shell_with(os: &FakeOs, engine: &FakeEngine) -> Shell {
+        Shell::new(built_in_apps(), Box::new(os.clone()), Box::new(engine.clone()))
+    }
+
     fn shell_on(os: &FakeOs) -> Shell {
-        Shell::new(built_in_apps(), Box::new(os.clone()))
+        shell_with(os, &FakeEngine::default())
     }
 
     fn shell() -> Shell {
@@ -267,5 +323,61 @@ start_url = \"https://x\"
     fn settings_shows_the_version_the_os_reports() {
         let os = fake_os();
         assert_eq!(shell_on(&os).version(), os.version());
+    }
+
+    #[test]
+    fn opening_an_app_launches_it_in_the_engine() {
+        let engine = FakeEngine::default();
+        let mut shell = shell_with(&fake_os(), &engine);
+        press(&mut shell, &[Key::Right, Key::Enter]);
+        assert_eq!(engine.events(), ["open spotify"]);
+    }
+
+    #[test]
+    fn keys_go_to_the_app_while_it_is_open_except_home_and_back() {
+        let engine = FakeEngine::default();
+        let mut shell = shell_with(&fake_os(), &engine);
+        press(&mut shell, &[Key::Enter, Key::Up, Key::Down, Key::Left, Key::Right, Key::Enter]);
+        assert_eq!(
+            engine.events(),
+            ["open youtube", "key Up", "key Down", "key Left", "key Right", "key Enter"]
+        );
+    }
+
+    #[test]
+    fn home_always_returns_to_the_shell_and_closes_the_app() {
+        let engine = FakeEngine::default();
+        engine.set_history(true);
+        let mut shell = shell_with(&fake_os(), &engine);
+        press(&mut shell, &[Key::Enter, Key::Home]);
+        assert_eq!(shell.screen(), &Screen::Home);
+        assert_eq!(engine.events(), ["open youtube", "close"]);
+    }
+
+    #[test]
+    fn back_goes_to_the_app_first_then_falls_through_to_the_shell() {
+        let engine = FakeEngine::default();
+        engine.set_history(true);
+        let mut shell = shell_with(&fake_os(), &engine);
+        press(&mut shell, &[Key::Enter, Key::Back]);
+        assert_eq!(shell.screen(), &Screen::App("youtube".into()));
+        engine.set_history(false);
+        shell.press(Key::Back);
+        assert_eq!(shell.screen(), &Screen::Home);
+        assert_eq!(engine.events(), ["open youtube", "back", "close"]);
+    }
+
+    #[test]
+    fn remote_keys_map_to_windows_virtual_key_codes() {
+        let codes: Vec<_> = [Key::Left, Key::Up, Key::Right, Key::Down, Key::Enter]
+            .map(Key::windows_key_code)
+            .into();
+        assert_eq!(codes, [Some(0x25), Some(0x26), Some(0x27), Some(0x28), Some(0x0D)]);
+        assert_eq!(
+            Key::Back.windows_key_code(),
+            None,
+            "Back and Home are the Shell's, not the page's"
+        );
+        assert_eq!(Key::Home.windows_key_code(), None);
     }
 }

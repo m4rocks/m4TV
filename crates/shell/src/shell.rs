@@ -3,7 +3,10 @@
 use m4tv_os::Os;
 use m4tv_settings::{Kind, SETTINGS, SettingDef, Settings};
 
-use crate::apps::AppDefinition;
+use crate::{
+    apps::AppDefinition,
+    engine::{Engine, Frame},
+};
 
 /// A TV-remote key. The dev-host keyboard and, later, the Remote both produce these.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,6 +21,18 @@ pub enum Key {
 }
 
 impl Key {
+    /// The Windows virtual-key code a page sees for this key. Back and Home belong to the Shell.
+    pub fn windows_key_code(self) -> Option<i32> {
+        Some(match self {
+            Key::Left => 0x25,
+            Key::Up => 0x26,
+            Key::Right => 0x27,
+            Key::Down => 0x28,
+            Key::Enter => 0x0D,
+            Key::Back | Key::Home => return None,
+        })
+    }
+
     /// Maps a gpui key name, the Dev host's stand-in for the TV remote: arrows, Enter,
     /// Esc as Back, and the Home key as Home.
     pub fn from_keystroke(key: &str) -> Option<Key> {
@@ -63,6 +78,7 @@ impl Row {
 pub struct Shell {
     apps: Vec<AppDefinition>,
     os: Box<dyn Os>,
+    engine: Box<dyn Engine>,
     settings: Settings,
     screen: Screen,
     focused: usize,
@@ -71,11 +87,12 @@ pub struct Shell {
 }
 
 impl Shell {
-    pub fn new(apps: Vec<AppDefinition>, os: Box<dyn Os>) -> Self {
+    pub fn new(apps: Vec<AppDefinition>, os: Box<dyn Os>, engine: Box<dyn Engine>) -> Self {
         let settings = Settings::load(&os.settings_path());
         Self {
             apps,
             os,
+            engine,
             settings,
             screen: Screen::Home,
             focused: 0,
@@ -126,15 +143,30 @@ impl Shell {
     pub fn press(&mut self, key: Key) {
         match self.screen {
             Screen::Home => self.press_home(key),
-            // While an App is open its keys belong to the App (wired up with the Engine), except
-            // Home, which the Shell reserves. Back falls through to Home until the Engine can take it first.
-            Screen::App(_) => {
-                if matches!(key, Key::Back | Key::Home) {
-                    self.screen = Screen::Home;
-                }
-            }
+            Screen::App(_) => self.press_app(key),
             Screen::Settings => self.press_settings(key),
         }
+    }
+
+    /// While an App is open its keys belong to the App, except Home, which the Shell reserves.
+    /// Back goes to the App first and falls through to the Shell when it has nothing to go back to.
+    fn press_app(&mut self, key: Key) {
+        match key {
+            Key::Home => self.close_app(),
+            Key::Back if !self.engine.can_go_back() => self.close_app(),
+            Key::Back => self.engine.go_back(),
+            _ => self.engine.key(key),
+        }
+    }
+
+    fn close_app(&mut self) {
+        self.engine.close();
+        self.screen = Screen::Home;
+    }
+
+    /// The newest frame of the open App.
+    pub fn take_frame(&mut self) -> Option<Frame> {
+        self.engine.take_frame()
     }
 
     fn press_home(&mut self, key: Key) {
@@ -143,7 +175,10 @@ impl Shell {
             Key::Right => self.focused = (self.focused + 1).min(self.apps.len()),
             Key::Enter => {
                 self.screen = match self.apps.get(self.focused) {
-                    Some(app) => Screen::App(app.id.clone()),
+                    Some(app) => {
+                        self.engine.open(app);
+                        Screen::App(app.id.clone())
+                    }
                     None => {
                         self.settings_focused = 0;
                         Screen::Settings

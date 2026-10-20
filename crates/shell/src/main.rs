@@ -8,6 +8,7 @@ use gpui_platform::application;
 use m4tv_os::FakeOs;
 use m4tv_shell::{
     apps::built_in_apps,
+    engine::NoEngine,
     shell::{Key, Row, Screen, Shell},
 };
 
@@ -111,7 +112,11 @@ fn main() {
                     let focus = cx.focus_handle();
                     window.focus(&focus, cx);
                     ShellView {
-                        shell: Shell::new(built_in_apps(), Box::new(FakeOs::dev_host())),
+                        shell: Shell::new(
+                            built_in_apps(),
+                            Box::new(FakeOs::dev_host()),
+                            Box::new(NoEngine),
+                        ),
                         focus,
                     }
                 })
