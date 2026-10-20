@@ -3,7 +3,13 @@ name = "m4tv-shell"
 version.workspace = true
 edition.workspace = true
 
+[features]
+# The Engine: CEF off-screen into gpui. Off by default so the core builds and tests without CEF.
+cef = ["dep:cef"]
+
 [dependencies]
+image = { version = "0.25", default-features = false }
+cef = { workspace = true, optional = true }
 m4tv-os.workspace = true
 m4tv-settings.workspace = true
 serde.workspace = true
