@@ -5,6 +5,8 @@ id = "youtube"
 name = "YouTube"
 icon = "youtube"
 start_url = "https://www.youtube.com/tv"
+# YouTube TV only serves its TV interface to a TV user agent. Data in the Shell, not a setting.
+user_agent = "Mozilla/5.0 (PlayStation; PlayStation 5/2.26) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/13.0 Safari/605.1.15"
 
 [[app]]
 id = "spotify"

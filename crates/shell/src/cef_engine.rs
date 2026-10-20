@@ -8,7 +8,7 @@ use std::{
 
 use cef::*;
 use m4tv_shell::{
-    apps::AppDefinition,
+    apps::{AppDefinition, page_script},
     engine::{Engine, Frame, Session},
     shell::Key,
 };
@@ -63,14 +63,53 @@ wrap_life_span_handler! {
     struct LifeSpan {
         shared: Shared,
         session: u64,
+        app: AppDefinition,
     }
 
     impl LifeSpanHandler {
         fn on_after_created(&self, browser: Option<&mut Browser>) {
             let Some(browser) = browser.cloned() else { return };
             // The App may have been closed while this browser was still being created.
-            let late = self.shared.lock().unwrap().attach(self.session, browser);
+            let late = self.shared.lock().unwrap().attach(self.session, browser.clone());
+            let stale = late.is_some();
             close_browser(late);
+            if stale {
+                return;
+            }
+            // The browser starts on a blank page so the user agent is in place before the App loads.
+            if let (Some(ua), Some(host)) = (&self.app.user_agent, browser.host()) {
+                if let Some(mut params) = dictionary_value_create() {
+                    params.set_string(Some(&"userAgent".into()), Some(&ua.as_str().into()));
+                    host.execute_dev_tools_method(
+                        0,
+                        Some(&"Emulation.setUserAgentOverride".into()),
+                        Some(&mut params),
+                    );
+                }
+            }
+            if let Some(frame) = browser.main_frame() {
+                frame.load_url(Some(&self.app.start_url.as_str().into()));
+            }
+        }
+    }
+}
+
+wrap_load_handler! {
+    struct Tuning {
+        script: String,
+    }
+
+    impl LoadHandler {
+        fn on_load_end(
+            &self,
+            _browser: Option<&mut Browser>,
+            frame: Option<&mut cef::Frame>,
+            _http_status_code: std::os::raw::c_int,
+        ) {
+            // Every page of the App gets the TV tuning; sub-frames (ads, embeds) do not.
+            if let Some(frame) = frame.filter(|f| f.is_main() != 0) {
+                frame.execute_java_script(Some(&self.script.as_str().into()), None, 0);
+            }
         }
     }
 }
@@ -79,6 +118,7 @@ wrap_client! {
     struct AppClient {
         render: RenderHandler,
         life_span: LifeSpanHandler,
+        tuning: LoadHandler,
     }
 
     impl Client {
@@ -88,6 +128,10 @@ wrap_client! {
 
         fn life_span_handler(&self) -> Option<LifeSpanHandler> {
             Some(self.life_span.clone())
+        }
+
+        fn load_handler(&self) -> Option<LoadHandler> {
+            Some(self.tuning.clone())
         }
     }
 }
@@ -162,13 +206,14 @@ impl Engine for CefEngine {
         close_browser(stale);
         let mut client = AppClient::new(
             Render::new(self.shared.clone(), session),
-            LifeSpan::new(self.shared.clone(), session),
+            LifeSpan::new(self.shared.clone(), session, app.clone()),
+            Tuning::new(page_script(app)),
         );
         let window_info = WindowInfo::default().set_as_windowless(Default::default());
         browser_host_create_browser(
             Some(&window_info),
             Some(&mut client),
-            Some(&CefString::from(app.start_url.as_str())),
+            Some(&CefString::from("about:blank")),
             Some(&BrowserSettings { windowless_frame_rate: 30, ..Default::default() }),
             None,
             Some(context),

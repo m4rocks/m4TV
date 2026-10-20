@@ -3,7 +3,10 @@
 #[cfg(feature = "cef")]
 mod cef_engine;
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use gpui::{
     App, Bounds, Context, FocusHandle, KeyDownEvent, RenderImage, Window, WindowBounds,
@@ -14,7 +17,7 @@ use m4tv_os::FakeOs;
 use m4tv_shell::{
     apps::built_in_apps,
     engine::{Engine, Frame},
-    shell::{Key, Row, Screen, Shell},
+    shell::{Key, Overlay, Row, Screen, Shell},
 };
 
 struct ShellView {
@@ -67,7 +70,7 @@ impl Render for ShellView {
         {
             let _ = window.drop_image(old);
         }
-        match screen {
+        let root = match screen {
             Screen::Home => {
                 let labels = self.shell.apps().iter().map(|app| app.name.clone());
                 let tiles = labels.chain(["Settings".to_string()]).enumerate().map(|(i, label)| {
@@ -133,7 +136,24 @@ impl Render for ShellView {
                     )),
                 }
             }
-        }
+        };
+        // Overlays sit on top of the screen, the playing App included, and take no focus.
+        root.children(self.shell.overlay().map(|overlay| {
+            match overlay {
+                Overlay::Volume { level, muted } => div()
+                    .absolute()
+                    .top(px(32.))
+                    .right(px(32.))
+                    .px_6()
+                    .py_3()
+                    .rounded_lg()
+                    .bg(rgb(0x1a2028))
+                    .border_2()
+                    .border_color(rgb(0x2a323c))
+                    .text_2xl()
+                    .child(if *muted { "Muted".to_string() } else { format!("Volume {level}") }),
+            }
+        }))
     }
 }
 
@@ -166,12 +186,18 @@ fn main() {
             .unwrap();
         // The Engine works on this thread, so it gets turns here; an open App repaints each turn.
         cx.spawn(async move |cx| {
+            let mut last = Instant::now();
             loop {
                 cx.background_executor().timer(Duration::from_millis(16)).await;
+                let elapsed = last.elapsed();
+                last = Instant::now();
                 #[cfg(feature = "cef")]
                 cef_engine::pump();
                 let _ = window.update(cx, |view, _window, cx| {
-                    if matches!(view.shell.screen(), Screen::App(_)) {
+                    let overlay_was_up = view.shell.overlay().is_some();
+                    view.shell.tick(elapsed);
+                    // Redraw while an App plays, and once more when an Overlay goes away.
+                    if matches!(view.shell.screen(), Screen::App(_)) || overlay_was_up {
                         cx.notify();
                     }
                 });
