@@ -4,6 +4,8 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+m4tv-os.workspace = true
+m4tv-settings.workspace = true
 serde.workspace = true
 toml.workspace = true
 gpui.workspace = true

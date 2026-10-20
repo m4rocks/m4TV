@@ -47,3 +47,11 @@ _Avoid_: Emulator, simulator, dev mode, desktop run
 **Setup hotspot**:
 The Wi-Fi network the TV broadcasts when it has no network, or when asked to, so a phone can set the TV up before it has a network: choosing the Wi-Fi to join, Pairing, and changing settings through the Remote.
 _Avoid_: Access point, AP mode, setup mode
+
+**Settings**:
+Every user-changeable option, each declared once and shared by the Shell and the Remote server. The Shell shows them on its Settings screen (reached from the Settings tile) and is the only writer of the stored values.
+_Avoid_: Preferences, options, config
+
+**OS seam**:
+The boundary between the Shell and the device: settings paths, power and reboot, version, and later audio, networking and the CDM location. The Pi implements it for real; the Dev host fakes it.
+_Avoid_: HAL, platform layer

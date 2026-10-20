@@ -2580,11 +2580,21 @@ name = "m4tv-os"
 version = "0.1.0"
 
 [[package]]
+name = "m4tv-settings"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "toml 0.8.23",
+]
+
+[[package]]
 name = "m4tv-shell"
 version = "0.1.0"
 dependencies = [
  "gpui-pre",
  "gpui-pre-platform",
+ "m4tv-os",
+ "m4tv-settings",
  "serde",
  "toml 0.8.23",
 ]

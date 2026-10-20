@@ -7,6 +7,8 @@ version = "0.1.0"
 edition = "2024"
 
 [workspace.dependencies]
+m4tv-os = { path = "crates/os" }
+m4tv-settings = { path = "crates/settings" }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 # Third-party weekly snapshot of Zed's gpui: pinned exactly, bumped deliberately.

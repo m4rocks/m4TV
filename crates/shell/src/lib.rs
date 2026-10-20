@@ -6,10 +6,41 @@ pub mod shell;
 #[cfg(test)]
 mod tests {
     use super::apps::{built_in_apps, parse_catalog};
-    use super::shell::{Key, Screen, Shell};
+    use super::shell::{Key, Row, Screen, Shell};
+    use m4tv_os::{FakeOs, Os, PowerAction};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A fake Os whose settings file is private to the calling test.
+    fn fake_os() -> FakeOs {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "m4tv-shell-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        FakeOs::new(dir.join("settings.toml"))
+    }
+
+    fn shell_on(os: &FakeOs) -> Shell {
+        Shell::new(built_in_apps(), Box::new(os.clone()))
+    }
 
     fn shell() -> Shell {
-        Shell::new(built_in_apps())
+        shell_on(&fake_os())
+    }
+
+    fn press(shell: &mut Shell, keys: &[Key]) {
+        for key in keys {
+            shell.press(*key);
+        }
+    }
+
+    /// Opens Settings and moves to the row with this label.
+    fn at_row(shell: &mut Shell, label: &str) {
+        press(shell, &[Key::Right, Key::Right, Key::Right, Key::Enter]);
+        let index = shell.settings_rows().iter().position(|row| row.label() == label).unwrap();
+        press(shell, &vec![Key::Down; index]);
     }
 
     #[test]
@@ -85,9 +116,9 @@ start_url = \"https://x\"
         for _ in 0..5 {
             shell.press(Key::Right);
         }
-        assert_eq!(shell.focused(), 2);
+        assert_eq!(shell.focused(), 3, "the Settings tile follows the three Apps");
         shell.press(Key::Left);
-        assert_eq!(shell.focused(), 1);
+        assert_eq!(shell.focused(), 2);
     }
 
     #[test]
@@ -156,5 +187,85 @@ start_url = \"https://x\"
                 None,
             ]
         );
+    }
+
+    #[test]
+    fn the_settings_tile_opens_settings_and_back_returns_to_it() {
+        let mut shell = shell();
+        press(&mut shell, &[Key::Right, Key::Right, Key::Right, Key::Enter]);
+        assert_eq!(shell.screen(), &Screen::Settings);
+        shell.press(Key::Back);
+        assert_eq!(shell.screen(), &Screen::Home);
+        assert_eq!(shell.focused(), 3);
+    }
+
+    #[test]
+    fn the_settings_screen_lists_every_declared_setting_then_the_device_actions() {
+        let mut shell = shell();
+        at_row(&mut shell, "Volume");
+        let labels: Vec<_> = shell.settings_rows().iter().map(Row::label).collect();
+        assert_eq!(labels, ["Volume", "Mute", "Reboot", "Power off"]);
+        assert_eq!(shell.settings_focused(), 0);
+    }
+
+    #[test]
+    fn settings_focus_moves_up_and_down_and_stops_at_the_ends() {
+        let mut shell = shell();
+        at_row(&mut shell, "Volume");
+        shell.press(Key::Up);
+        assert_eq!(shell.settings_focused(), 0);
+        press(&mut shell, &[Key::Down; 9]);
+        assert_eq!(shell.settings_focused(), 3);
+    }
+
+    #[test]
+    fn left_and_right_change_a_setting_and_enter_flips_a_toggle() {
+        let mut shell = shell();
+        at_row(&mut shell, "Volume");
+        press(&mut shell, &[Key::Right, Key::Right, Key::Left, Key::Enter]);
+        assert_eq!(shell.setting_text("volume"), "55");
+        press(&mut shell, &[Key::Down, Key::Enter]);
+        assert_eq!(shell.setting_text("mute"), "On");
+    }
+
+    #[test]
+    fn a_changed_setting_survives_a_restart() {
+        let os = fake_os();
+        let mut shell = shell_on(&os);
+        at_row(&mut shell, "Volume");
+        press(&mut shell, &[Key::Left, Key::Left, Key::Down, Key::Enter]);
+        drop(shell);
+        let restarted = shell_on(&os);
+        assert_eq!(restarted.setting_text("volume"), "40");
+        assert_eq!(restarted.setting_text("mute"), "On");
+    }
+
+    #[test]
+    fn reboot_and_power_off_go_through_the_os_seam_and_are_announced() {
+        let os = fake_os();
+        let mut shell = shell_on(&os);
+        at_row(&mut shell, "Reboot");
+        shell.press(Key::Enter);
+        assert!(shell.notice().unwrap().contains("reboot"));
+        press(&mut shell, &[Key::Down, Key::Enter]);
+        assert!(shell.notice().unwrap().contains("power off"));
+        assert_eq!(os.actions(), [PowerAction::Reboot, PowerAction::PowerOff]);
+        shell.press(Key::Up);
+        assert_eq!(shell.notice(), None, "the announcement lasts until the next key");
+    }
+
+    #[test]
+    fn left_and_right_do_nothing_on_a_device_action() {
+        let os = fake_os();
+        let mut shell = shell_on(&os);
+        at_row(&mut shell, "Reboot");
+        press(&mut shell, &[Key::Left, Key::Right]);
+        assert_eq!(os.actions(), []);
+    }
+
+    #[test]
+    fn settings_shows_the_version_the_os_reports() {
+        let os = fake_os();
+        assert_eq!(shell_on(&os).version(), os.version());
     }
 }
