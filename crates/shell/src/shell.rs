@@ -311,9 +311,9 @@ impl Shell {
         let wanted = self.pairing_requested
             || (remote.connections() == 0 && !matches!(self.screen, Screen::App(_)));
         if wanted {
-            let pin = remote.pairings().pin();
+            let (pin, secret) = remote.pairings().offer();
             let overlay = Overlay::Pairing {
-                payload: remote.pairing_link(&pin),
+                payload: remote.pairing_link(&secret),
                 cert_replaced: remote.cert_replaced() && phones == 0,
                 pin,
             };

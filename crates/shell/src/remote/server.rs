@@ -15,14 +15,19 @@ use axum::{
         Query, Request, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
-    http::{HeaderMap, StatusCode, header::AUTHORIZATION},
+    http::{
+        HeaderMap, StatusCode, Uri,
+        header::{AUTHORIZATION, CONTENT_TYPE, HOST},
+    },
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post, put},
 };
+use rust_embed::RustEmbed;
 use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::{mpsc::UnboundedSender, watch};
+use ts_rs::TS;
 
 use super::{Command, LiveState, PairError, Pairings};
 use crate::shell::Key;
@@ -33,6 +38,13 @@ const RECHECK: Duration = Duration::from_secs(1);
 /// left the Wi-Fi never closes its socket, and would hide the Pairing Overlay for good.
 const PING_AFTER: Duration = Duration::from_secs(5);
 const DEAD_AFTER: Duration = Duration::from_secs(15);
+
+/// The Remote web app (`packages/remote`, built by build.rs): read from disk in a debug build,
+/// compiled in for release.
+#[derive(RustEmbed)]
+#[folder = "../../packages/remote/dist/"]
+#[exclude = ".built"]
+struct Web;
 
 #[derive(Clone)]
 pub(super) struct Shared {
@@ -52,9 +64,33 @@ pub(super) fn router(shared: Shared) -> Router {
         .layer(middleware::from_fn_with_state(shared.clone(), authenticate));
     Router::new()
         .route("/api/pair", post(pair))
+        .route("/api/pair/challenge", post(challenge))
+        .route("/api/pair/prove", post(prove))
         .route("/api/ws", get(ws))
         .nest("/api", api)
+        .fallback(web)
         .with_state(shared)
+}
+
+/// Serves the Remote web app. Its `index.html` is also the landing page for a browser that cannot
+/// run the app, so it is told the address the viewer used.
+async fn web(headers: HeaderMap, uri: Uri) -> Response {
+    let path = uri.path().trim_start_matches('/');
+    let path = if path.is_empty() { "index.html" } else { path };
+    let Some(file) = Web::get(path) else { return StatusCode::NOT_FOUND.into_response() };
+    if path != "index.html" {
+        return ([(CONTENT_TYPE, file.metadata.mimetype().to_string())], file.data.into_owned())
+            .into_response();
+    }
+    // The Host header is the viewer's own input, so only a plain host and port go into the page.
+    let host = headers
+        .get(HOST)
+        .and_then(|host| host.to_str().ok())
+        .filter(|host| host.chars().all(|c| c.is_ascii_alphanumeric() || ".-:[]".contains(c)))
+        .unwrap_or(super::HOST);
+    let page =
+        String::from_utf8_lossy(&file.data).replace("{{ADDRESS}}", &format!("https://{host}/"));
+    ([(CONTENT_TYPE, "text/html; charset=utf-8")], page).into_response()
 }
 
 fn refuse(status: StatusCode, error: &str) -> Response {
@@ -73,7 +109,7 @@ async fn authenticate(State(shared): State<Shared>, request: Request, next: Next
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, TS)]
 struct PairRequest {
     pin: String,
     #[serde(default)]
@@ -92,6 +128,34 @@ async fn pair(State(shared): State<Shared>, Json(request): Json<PairRequest>) ->
     }
 }
 
+async fn challenge(State(shared): State<Shared>) -> Response {
+    match shared.pairings.challenge() {
+        Ok(challenge) => Json(json!({ "challenge": challenge })).into_response(),
+        Err(_) => refuse(StatusCode::FORBIDDEN, "not pairing"),
+    }
+}
+
+#[derive(Deserialize, TS)]
+struct ProveRequest {
+    challenge: String,
+    nonce: String,
+    proof: String,
+    #[serde(default)]
+    name: String,
+}
+
+async fn prove(State(shared): State<Shared>, Json(request): Json<ProveRequest>) -> Response {
+    let name = request.name.trim().chars().take(40).collect::<String>();
+    let name = if name.is_empty() { "Phone" } else { &name };
+    match shared.pairings.prove(&request.challenge, &request.nonce, &request.proof, name) {
+        Ok(proof) => Json(json!({ "proof": proof })).into_response(),
+        Err(PairError::WrongPin) => refuse(StatusCode::FORBIDDEN, "wrong secret"),
+        Err(PairError::Save(_)) => {
+            refuse(StatusCode::INTERNAL_SERVER_ERROR, "could not save the pairing")
+        }
+    }
+}
+
 async fn state(State(shared): State<Shared>) -> Json<LiveState> {
     Json(shared.state.borrow().clone())
 }
@@ -104,7 +168,7 @@ fn send(shared: &Shared, command: Command) -> Response {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, TS)]
 struct KeyRequest {
     code: String,
 }
@@ -116,7 +180,7 @@ async fn key(State(shared): State<Shared>, Json(request): Json<KeyRequest>) -> R
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, TS)]
 struct LaunchRequest {
     app: String,
 }
@@ -128,7 +192,7 @@ async fn launch(State(shared): State<Shared>, Json(request): Json<LaunchRequest>
     send(&shared, Command::Launch(request.app))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, TS)]
 struct OrderRequest {
     apps: Vec<String>,
 }
@@ -144,7 +208,7 @@ async fn order(State(shared): State<Shared>, Json(request): Json<OrderRequest>) 
     send(&shared, Command::Order(request.apps))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, TS)]
 struct TextRequest {
     text: String,
 }
@@ -220,5 +284,45 @@ async fn push_state(mut socket: WebSocket, shared: Shared, token: String) {
                 },
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{env, fs, path::Path};
+
+    use ts_rs::{Config, TS};
+
+    use super::*;
+    use crate::remote::AppSummary;
+
+    /// The TypeScript types the Remote web app uses, generated from the Rust ones. Stale types
+    /// fail this test; `UPDATE_TS=1 cargo test -p m4tv-shell typescript` rewrites them.
+    #[test]
+    fn the_typescript_types_are_generated_from_the_rust_ones() {
+        let cfg = Config::new();
+        let mut generated = String::from(
+            "// Generated from the Rust types in crates/shell/src/remote. Do not edit: run\n\
+             // `UPDATE_TS=1 cargo test -p m4tv-shell typescript`.\n\n",
+        );
+        for decl in [
+            AppSummary::decl(&cfg),
+            LiveState::decl(&cfg),
+            PairRequest::decl(&cfg),
+            ProveRequest::decl(&cfg),
+            KeyRequest::decl(&cfg),
+            LaunchRequest::decl(&cfg),
+            OrderRequest::decl(&cfg),
+            TextRequest::decl(&cfg),
+        ] {
+            generated += &format!("export {decl}\n\n");
+        }
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packages/remote/src/protocol/api.ts");
+        if env::var_os("UPDATE_TS").is_some() {
+            fs::write(&path, &generated).unwrap();
+        }
+        let committed = fs::read_to_string(&path).unwrap_or_default().replace("\r\n", "\n");
+        assert_eq!(committed, generated, "packages/remote/src/protocol/api.ts is stale");
     }
 }

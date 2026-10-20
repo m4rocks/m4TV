@@ -17,6 +17,7 @@ use std::{
 use axum_server::tls_rustls::RustlsConfig;
 use serde::Serialize;
 use tokio::sync::{mpsc, watch};
+use ts_rs::TS;
 
 pub use pairing::{PairError, Pairings, Phone};
 
@@ -26,7 +27,7 @@ use crate::shell::Key;
 const HOST: &str = "m4tv.local";
 
 /// What the Shell shows, as the Remote sees it.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, TS)]
 pub struct LiveState {
     /// "home", "app" or "settings".
     pub screen: &'static str,
@@ -36,13 +37,14 @@ pub struct LiveState {
     pub focus: usize,
     /// The Apps in Home's order.
     pub apps: Vec<AppSummary>,
+    #[ts(type = "number")]
     pub volume: i64,
     pub muted: bool,
     /// Whether the open App has an editable field focused.
     pub editable: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
 pub struct AppSummary {
     pub id: String,
     pub name: String,
@@ -72,8 +74,9 @@ pub struct Remote {
 
 impl Remote {
     /// Starts serving on `port` (0 picks a free one), keeping the certificate and paired phones
-    /// in `dir`. With `advertise`, the TV announces itself as `m4tv.local` over mDNS.
-    pub fn start(dir: &Path, port: u16, advertise: bool) -> io::Result<Self> {
+    /// in `dir`. With `lan`, phones on the network can reach it and the TV announces itself as
+    /// `m4tv.local` over mDNS; without, only this machine can (tests, and no firewall prompt).
+    pub fn start(dir: &Path, port: u16, lan: bool) -> io::Result<Self> {
         let (identity, created) = identity::load_or_create(dir)?;
         let pairings = Pairings::load(&dir.join("phones.toml"));
         // Phones pinned the old certificate, so none of them can connect any more.
@@ -83,7 +86,8 @@ impl Remote {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let runtime =
             tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build()?;
-        let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, port))?;
+        let bind = if lan { Ipv4Addr::UNSPECIFIED } else { Ipv4Addr::LOCALHOST };
+        let listener = TcpListener::bind((bind, port))?;
         listener.set_nonblocking(true)?;
         let port = listener.local_addr()?.port();
         let config =
@@ -107,7 +111,7 @@ impl Remote {
                 }
             });
         }
-        let mdns = advertise.then(|| advertise_mdns(port)).flatten();
+        let mdns = lan.then(|| advertise_mdns(port)).flatten();
         Ok(Self {
             runtime: Some(runtime),
             port,
@@ -146,10 +150,10 @@ impl Remote {
         self.connections.load(Ordering::SeqCst)
     }
 
-    /// The link a Pairing QR code carries: the PIN and the certificate fingerprint ride in the
-    /// fragment, which a browser never sends to the server.
-    pub fn pairing_link(&self, pin: &str) -> String {
-        format!("https://{HOST}:{}/#pin={pin}&fp={}", self.port, self.fingerprint)
+    /// The link a Pairing QR code carries: the one-time secret and the certificate fingerprint
+    /// (for the viewer to compare) ride in the fragment, which a browser never sends to the server.
+    pub fn pairing_link(&self, secret: &str) -> String {
+        format!("https://{HOST}:{}/#secret={secret}&fp={}", self.port, self.fingerprint)
     }
 
     pub(crate) fn next_command(&mut self) -> Option<Command> {
