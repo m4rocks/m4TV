@@ -1,11 +1,26 @@
-set windows-shell := ["powershell.exe", "-NoLogo", "-Command"]
+# Bypass is for this process only: the VS developer shell script is unsigned, and the default
+# policy refuses to run scripts.
+set windows-shell := ["powershell.exe", "-NoLogo", "-ExecutionPolicy", "Bypass", "-Command"]
 
 # List the recipes.
 default:
     @just --list
 
-# Run the Shell with the Engine (the Dev host on Windows). The first build downloads CEF and
-# compiles its wrapper, so it needs cmake, ninja and MSVC on PATH: a Visual Studio developer shell.
+# The first build downloads CEF into ~/.cache/m4tv-cef (unless CEF_PATH is set) and compiles its
+# wrapper, which needs cmake, ninja and MSVC: on Windows this opens the Visual Studio developer
+# environment unless you are already in one.
+
+# Run the Shell with the Engine (the Dev host on Windows).
+[windows]
+run:
+    if (-not $env:VSCMD_VER) { \
+        $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath; \
+        & "$vs\Common7\Tools\Launch-VsDevShell.ps1" -Arch amd64 -SkipAutomaticLocation \
+    }; \
+    if (-not $env:CEF_PATH) { $env:CEF_PATH = "$HOME\.cache\m4tv-cef" }; \
+    cargo run -p m4tv-shell --features cef
+
+[unix]
 run:
     cargo run -p m4tv-shell --features cef
 
