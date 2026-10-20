@@ -1,0 +1,10 @@
+[package]
+name = "m4tv-shell"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde.workspace = true
+toml.workspace = true
+gpui.workspace = true
+gpui_platform.workspace = true
