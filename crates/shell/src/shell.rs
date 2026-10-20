@@ -11,7 +11,7 @@ use crate::{
     remote::{AppSummary, Command, LiveState, Phone, Remote},
 };
 
-/// A TV-remote key. The dev-host keyboard and, later, the Remote both produce these.
+/// A TV-remote key. The Dev host keyboard and the Remote both produce these.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Key {
     Up,

@@ -5,12 +5,16 @@ use std::{
     io,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
+    time::{Duration, Instant},
 };
 
 use serde::{Deserialize, Serialize};
 
+const PIN_DIGITS: usize = 6;
 /// Wrong PINs tolerated before the PIN on screen is replaced.
 const PIN_TRIES: u32 = 5;
+/// How long pairing is refused after the PIN is replaced, so guessing gets nowhere on a LAN.
+const LOCKOUT: Duration = Duration::from_secs(30);
 
 /// A paired phone, as the Shell lists it. The token never leaves `Pairings`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,6 +47,7 @@ struct Inner {
     phones: Vec<Stored>,
     pin: Option<String>,
     tries: u32,
+    locked_until: Option<Instant>,
 }
 
 #[derive(Clone)]
@@ -70,6 +75,7 @@ impl Inner {
             toml::to_string(&File { phone: self.phones.clone() }).map_err(io::Error::other)?;
         let tmp = self.path.with_extension("toml.tmp");
         std::fs::write(&tmp, file)?;
+        super::identity::restrict(&tmp)?;
         std::fs::rename(&tmp, &self.path)
     }
 }
@@ -87,13 +93,14 @@ impl Pairings {
             phones: file.phone,
             pin: None,
             tries: 0,
+            locked_until: None,
         })))
     }
 
     /// The PIN to show on the TV, made when there is none yet.
     pub fn pin(&self) -> String {
         let mut inner = self.0.lock().unwrap();
-        inner.pin.get_or_insert_with(|| random_digits(6)).clone()
+        inner.pin.get_or_insert_with(|| random_digits(PIN_DIGITS)).clone()
     }
 
     /// Stops accepting the PIN, because the TV no longer shows it.
@@ -107,12 +114,16 @@ impl Pairings {
     /// a row replace the PIN, so it cannot be guessed.
     pub fn redeem(&self, pin: &str, name: &str) -> Result<String, PairError> {
         let mut inner = self.0.lock().unwrap();
+        if inner.locked_until.is_some_and(|until| Instant::now() < until) {
+            return Err(PairError::WrongPin);
+        }
         let Some(shown) = inner.pin.clone() else { return Err(PairError::WrongPin) };
         if pin != shown {
             inner.tries += 1;
             if inner.tries >= PIN_TRIES {
-                inner.pin = Some(random_digits(6));
+                inner.pin = Some(random_digits(PIN_DIGITS));
                 inner.tries = 0;
+                inner.locked_until = Some(Instant::now() + LOCKOUT);
             }
             return Err(PairError::WrongPin);
         }

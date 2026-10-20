@@ -5,11 +5,12 @@ use std::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use axum::{
     Json, Router,
+    body::Bytes,
     extract::{
         Query, Request, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -26,8 +27,12 @@ use tokio::sync::{mpsc::UnboundedSender, watch};
 use super::{Command, LiveState, PairError, Pairings};
 use crate::shell::Key;
 
-/// How often an open WebSocket checks that its phone is still paired.
+/// How often an open WebSocket checks that its phone is still paired and still there.
 const RECHECK: Duration = Duration::from_secs(1);
+/// A quiet phone is pinged after this long, and dropped after `DEAD_AFTER`: one that slept or
+/// left the Wi-Fi never closes its socket, and would hide the Pairing Overlay for good.
+const PING_AFTER: Duration = Duration::from_secs(5);
+const DEAD_AFTER: Duration = Duration::from_secs(15);
 
 #[derive(Clone)]
 pub(super) struct Shared {
@@ -189,6 +194,7 @@ async fn push_state(mut socket: WebSocket, shared: Shared, token: String) {
     let _open = Connection::open(&shared.connections);
     let mut changes = shared.state.subscribe();
     let mut recheck = tokio::time::interval(RECHECK);
+    let mut heard = Instant::now();
     loop {
         let text = serde_json::to_string(&*changes.borrow_and_update()).expect("state is JSON");
         if socket.send(Message::Text(text.into())).await.is_err() {
@@ -202,10 +208,15 @@ async fn push_state(mut socket: WebSocket, shared: Shared, token: String) {
                 }
                 _ = recheck.tick() => {
                     if !shared.pairings.check(&token) { return }
+                    let quiet = heard.elapsed();
+                    if quiet > DEAD_AFTER { return }
+                    if quiet > PING_AFTER && socket.send(Message::Ping(Bytes::new())).await.is_err() {
+                        return;
+                    }
                 }
                 incoming = socket.recv() => match incoming {
                     None | Some(Err(_) | Ok(Message::Close(_))) => return,
-                    Some(Ok(_)) => {}
+                    Some(Ok(_)) => heard = Instant::now(),
                 },
             }
         }

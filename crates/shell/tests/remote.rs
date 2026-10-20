@@ -354,7 +354,7 @@ fn an_unpaired_client_is_refused() {
 }
 
 #[test]
-fn a_wrong_pin_is_refused_and_too_many_change_the_pin() {
+fn a_wrong_pin_is_refused_and_too_many_replace_it_and_pause_pairing() {
     let mut rig = Rig::new();
     let api = rig.api();
     let (pin, _) = rig.pairing();
@@ -367,9 +367,11 @@ fn a_wrong_pin_is_refused_and_too_many_change_the_pin() {
     rig.shell.tick(Duration::ZERO);
     let (new_pin, _) = rig.pairing();
     assert_ne!(new_pin, pin);
-    // The PIN that was on screen no longer works.
+    // The PIN that was on screen no longer works, and neither does the new one for a while.
     let (status, _) = rig.drive(api.post("/api/pair", None, json!({"pin": pin, "name": "x"})));
     assert_eq!(status, 403);
+    let (status, _) = rig.drive(api.post("/api/pair", None, json!({"pin": new_pin, "name": "x"})));
+    assert_eq!(status, 403, "pairing is paused after too many wrong PINs");
 }
 
 #[test]
@@ -498,10 +500,10 @@ fn the_websocket_refuses_a_stranger_and_drops_a_revoked_phone() {
 }
 
 #[test]
-fn a_pairing_popup_stays_until_a_phone_has_the_remote_open() {
+fn the_pairing_overlay_stays_until_a_phone_has_the_remote_open() {
     let mut rig = Rig::new();
     let api = rig.api();
-    // Nobody has the Remote open: the popup is up and does not time out.
+    // Nobody has the Remote open: the Overlay is up and does not time out.
     rig.shell.tick(Duration::from_secs(3600));
     assert!(matches!(rig.shell.overlay(), Some(Overlay::Pairing { .. })));
     // A volume change does not cover it.
@@ -526,7 +528,7 @@ fn a_pairing_popup_stays_until_a_phone_has_the_remote_open() {
 }
 
 #[test]
-fn settings_can_bring_the_pairing_popup_back_for_another_phone() {
+fn settings_can_bring_the_pairing_overlay_back_for_another_phone() {
     let mut rig = Rig::new();
     let api = rig.api();
     let token = rig.pair("Pixel");
@@ -546,7 +548,7 @@ fn settings_can_bring_the_pairing_popup_back_for_another_phone() {
     let second = rig.pair("Tablet");
     assert_ne!(second, token);
     rig.shell.tick(Duration::ZERO);
-    assert_eq!(rig.shell.overlay(), None, "pairing closes the popup");
+    assert_eq!(rig.shell.overlay(), None, "pairing closes the Overlay");
 }
 
 #[test]

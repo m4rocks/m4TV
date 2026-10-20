@@ -40,14 +40,14 @@ pub fn load_or_create(dir: &Path) -> io::Result<(Identity, bool)> {
     Ok((Identity { cert_pem, key_pem, fingerprint }, true))
 }
 
-/// The key is the Remote server's secret: only its owner reads it.
+/// Keys and tokens are the Remote server's secrets: only the file's owner reads them.
 #[cfg(unix)]
-fn restrict(path: &Path) -> io::Result<()> {
+pub(super) fn restrict(path: &Path) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
 }
 
 #[cfg(not(unix))]
-fn restrict(_path: &Path) -> io::Result<()> {
+pub(super) fn restrict(_path: &Path) -> io::Result<()> {
     Ok(())
 }
