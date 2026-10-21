@@ -1,5 +1,7 @@
 # Embed CEF via off-screen rendering into gpui
 
+**Superseded by [ADR 0006](0006-run-the-engine-as-castlabs-electron-in-a-child-process.md)**: the off-screen idea stands, but the Engine is now castLabs Electron in a child process, because compiling our own CEF with H.264/AAC was not wanted.
+
 The Engine is the CEF library, embedded in the Shell, with its frames rendered off-screen into gpui, because the Shell must draw Overlays on a playing App and keep keyboard focus, which separate Cage windows cannot do (Cage has no layer-shell and no way to raise or focus a window). We start with CPU copies into a gpui image and fork `gpui-pre-wgpu` for dmabuf import only if a Pi 4 spike misses the frame budget.
 
 ## Considered Options
