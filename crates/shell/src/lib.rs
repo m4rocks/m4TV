@@ -1,6 +1,7 @@
 //! The Shell's UI-independent core: App definitions and the TV-remote navigation state.
 
 pub mod apps;
+pub mod electron_engine;
 pub mod engine;
 pub mod remote;
 pub mod shell;
@@ -505,17 +506,20 @@ start_url = \"https://x\"
     }
 
     #[test]
-    fn remote_keys_map_to_windows_virtual_key_codes() {
+    fn remote_keys_map_to_the_names_electron_takes_for_input_events() {
         let codes: Vec<_> = [Key::Left, Key::Up, Key::Right, Key::Down, Key::Enter]
-            .map(Key::windows_key_code)
+            .map(Key::electron_key_code)
             .into();
-        assert_eq!(codes, [Some(0x25), Some(0x26), Some(0x27), Some(0x28), Some(0x0D)]);
         assert_eq!(
-            Key::Back.windows_key_code(),
+            codes,
+            [Some("Left"), Some("Up"), Some("Right"), Some("Down"), Some("Return")]
+        );
+        assert_eq!(
+            Key::Back.electron_key_code(),
             None,
             "Back and Home are the Shell's, not the page's"
         );
-        assert_eq!(Key::Home.windows_key_code(), None);
+        assert_eq!(Key::Home.electron_key_code(), None);
     }
 
     fn frame() -> super::engine::Frame {
@@ -612,7 +616,12 @@ start_url = \"https://x\"
         }
         assert_eq!(Key::from_code("KeyA"), None);
         // Media keys reach the page; Back, Home and volume stay with the Shell.
-        assert_eq!(Key::PlayPause.windows_key_code(), Some(0xB3));
-        assert_eq!(Key::Home.windows_key_code(), None);
+        assert_eq!(Key::PlayPause.electron_key_code(), Some("MediaPlayPause"));
+        assert_eq!(Key::Home.electron_key_code(), None);
+        // What the Remote's buttons send ends up as an Electron input event.
+        let sent: Vec<_> = ["ArrowLeft", "Enter", "MediaTrackNext", "Escape"]
+            .map(|code| Key::from_code(code).and_then(Key::electron_key_code))
+            .into();
+        assert_eq!(sent, [Some("Left"), Some("Return"), Some("MediaNextTrack"), None]);
     }
 }

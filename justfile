@@ -6,24 +6,15 @@ set windows-shell := ["powershell.exe", "-NoLogo", "-ExecutionPolicy", "Bypass",
 default:
     @just --list
 
-# The first build downloads CEF into ~/.cache/m4tv-cef (unless CEF_PATH is set) and compiles its
-# wrapper, which needs cmake, ninja and MSVC: on Windows this opens the Visual Studio developer
-# environment unless you are already in one.
+# Download the pinned castLabs Electron (ADR 0006) into .m4tv-dev/electron, once. It is the Engine
+# the Dev host runs; it needs Node.
+engine:
+    node engine/fetch-electron.mjs
 
 # Run the Shell with the Engine (the Dev host on Windows). Building it builds the Remote web app
 # first (crates/shell/build.rs, which needs Node; set M4TV_SKIP_WEB=1 to go without).
-[windows]
-run:
-    if (-not $env:VSCMD_VER) { \
-        $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath; \
-        & "$vs\Common7\Tools\Launch-VsDevShell.ps1" -Arch amd64 -SkipAutomaticLocation \
-    }; \
-    if (-not $env:CEF_PATH) { $env:CEF_PATH = "$HOME\.cache\m4tv-cef" }; \
-    cargo run -p m4tv-shell --features cef
-
-[unix]
-run:
-    cargo run -p m4tv-shell --features cef
+run: engine
+    cargo run -p m4tv-shell
 
 # Compile everything, as CI does.
 build:

@@ -79,6 +79,11 @@ impl<B> Session<B> {
         self.browser.take()
     }
 
+    /// Whether `session` is the one that is open.
+    pub fn is_current(&self, session: u64) -> bool {
+        self.open && session == self.current
+    }
+
     /// Keeps the browser of the open session; hands any other straight back to close.
     pub fn attach(&mut self, session: u64, browser: B) -> Option<B> {
         if self.open && session == self.current {

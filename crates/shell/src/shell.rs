@@ -33,18 +33,18 @@ pub enum Key {
 }
 
 impl Key {
-    /// The Windows virtual-key code a page sees for this key. Back, Home and the volume keys
+    /// The name Electron's `sendInputEvent` takes for this key. Back, Home and the volume keys
     /// belong to the Shell; media keys go to the page.
-    pub fn windows_key_code(self) -> Option<i32> {
+    pub fn electron_key_code(self) -> Option<&'static str> {
         Some(match self {
-            Key::Left => 0x25,
-            Key::Up => 0x26,
-            Key::Right => 0x27,
-            Key::Down => 0x28,
-            Key::Enter => 0x0D,
-            Key::PlayPause => 0xB3,
-            Key::NextTrack => 0xB0,
-            Key::PreviousTrack => 0xB1,
+            Key::Left => "Left",
+            Key::Up => "Up",
+            Key::Right => "Right",
+            Key::Down => "Down",
+            Key::Enter => "Return",
+            Key::PlayPause => "MediaPlayPause",
+            Key::NextTrack => "MediaNextTrack",
+            Key::PreviousTrack => "MediaPreviousTrack",
             Key::Back | Key::Home | Key::VolumeUp | Key::VolumeDown | Key::Mute => return None,
         })
     }
