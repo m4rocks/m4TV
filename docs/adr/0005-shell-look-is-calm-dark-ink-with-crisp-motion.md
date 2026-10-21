@@ -18,7 +18,7 @@ The Shell's identity is a calm, content-first interface: near-black surfaces, on
 - **First boot**: the Setup hotspot takes over the whole screen with a large Wi-Fi QR on a white card, in both themes, with two numbered steps. The handover to the new address reuses that layout. The Pairing PIN is a normal Overlay, not a screen.
 - **Remote**: the Remote is part of this design. It uses the shared tokens (ink palette, radii, spacing, type scale), follows the phone's own light/dark preference rather than the TV's Theme (the TV Theme is just a TV setting shown as a row), uses Inter, and limits motion to press feedback and `prefers-reduced-motion`. It has none of the Shell's focus scale or launch transition.
 - **Tokens**: one `design/tokens.json` (colours per theme, radii, spacing, type scale, motion durations) read by `tailwind.config.js` and by the Shell at build time, so the look is declared once, as Settings and protocol types already are. A test fails when either side hard-codes a value that is not a token.
-- **Judging the Pi 4**: the Dev host shows the look, never the performance. A frame-time readout behind a developer flag, and a fixed checklist run on the Pi 4 at each look change (focus move, launch, an Overlay over 1080p30 video), with the numbers recorded in the build tickets.
+- **Judging the Pi 4**: the Dev host shows the look, never the performance. A frame-time readout turned on by an environment variable (not a Setting, so the Remote never shows it) that also writes p50, p95 and p99 frame times and dropped video frames to a log file, and a fixed checklist run by hand on the Pi 4 and Pi 5 at milestones (focus move, launch, an Overlay over 1080p30 video): after the Home, launch and Overlay tickets land, and before each release. The numbers go in the table and bars below.
 
 ## Effect budget
 
@@ -30,8 +30,19 @@ None of these costs is measured yet; the Pi 4 numbers come from the frame-path s
 | Launch grow and crossfade | One transform, then one opacity animation, while CEF is loading | Kept. Falls back to the Reduce motion fades; the fades are the floor |
 | Overlay panel at about 90% opacity | One alpha-blended quad over the App frame | Kept |
 | Hero clock | Redraws once a minute | Kept; the Shell never redraws idle frames for it |
-| Backdrop blur on Overlays | A render pass over the live App frame | **Cut.** gpui-pre 0.3.9 has no backdrop blur (only shadow blur and a Windows-only window material), so it would mean a custom render pass in a gpui fork. It returns, on both boards, only if #32 shows headroom |
+| Backdrop blur on Overlays | A render pass over the live App frame | **Cut.** gpui-pre 0.3.9 has no backdrop blur (only shadow blur and a Windows-only window material), so it would mean a custom render pass in a gpui fork. It returns, on both boards, only if the Pi 4 meets every bar below with at least 25% frame time spare at p95 while an Overlay is up (#60) |
 | Glow in the App's colour, parallax or tilt | Per-frame blur or layered artwork | **Cut** |
+
+## Pass bars
+
+Written before the first measurement, so the spike (#32) and the checklist (#59) give pass or fail. Each is measured on a Pi 4 with an Overlay over 1080p30 video, and a Pi 5 must meet the same bars:
+
+- At most 1% dropped video frames over 5 minutes.
+- The idle Shell averages at least 58 fps.
+- The Shell holds at least 30 fps while video plays.
+- At least 1 GB of RAM is free with the three Apps loaded.
+
+If the Pi 4 misses, the remedies go in this order: the 30 fps Shell fallback first (a setting, no fork), and the dmabuf fork of `gpui-pre-wgpu` only if video frames still drop. Video stays 1080p30 and both boards stay identical. These numbers are my starting guesses and may change once a Pi has run them; changing a bar is an edit to this section.
 
 ## Considered Options
 
