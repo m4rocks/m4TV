@@ -1,4 +1,4 @@
-import type { SetupView } from "./protocol/api";
+import type { SettingState, SetupView } from "./protocol/api";
 
 export type Tab = "wifi" | "remote" | "apps" | "settings";
 
@@ -18,6 +18,15 @@ export function moved(ids: string[], from: number, to: number): string[] {
   const next = [...ids];
   next.splice(to, 0, ...next.splice(from, 1));
   return next;
+}
+
+/** The settings grouped by category, in the order the declaration first lists each one. */
+export function byCategory(settings: SettingState[]): [string, SettingState[]][] {
+  const groups = new Map<string, SettingState[]>();
+  for (const setting of settings) {
+    groups.set(setting.category, [...(groups.get(setting.category) ?? []), setting]);
+  }
+  return [...groups];
 }
 
 /** What to tell the phone while the TV joins a Wi-Fi or once it has, if anything. */

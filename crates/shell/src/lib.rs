@@ -299,20 +299,23 @@ start_url = \"https://x\"
     #[test]
     fn the_settings_screen_lists_every_declared_setting_then_the_device_actions() {
         let mut shell = shell();
-        at_row(&mut shell, "Volume");
+        at_row(&mut shell, "Theme");
         let labels: Vec<_> = shell.settings_rows().iter().map(Row::label).collect();
-        assert_eq!(labels, ["Volume", "Mute", "Reboot", "Power off"]);
+        assert_eq!(
+            labels,
+            ["Theme", "Reduce motion", "24-hour clock", "Volume", "Mute", "Reboot", "Power off"]
+        );
         assert_eq!(shell.settings_focused(), 0);
     }
 
     #[test]
     fn settings_focus_moves_up_and_down_and_stops_at_the_ends() {
         let mut shell = shell();
-        at_row(&mut shell, "Volume");
+        at_row(&mut shell, "Theme");
         shell.press(Key::Up);
         assert_eq!(shell.settings_focused(), 0);
-        press(&mut shell, &[Key::Down; 9]);
-        assert_eq!(shell.settings_focused(), 3);
+        press(&mut shell, &[Key::Down; 12]);
+        assert_eq!(shell.settings_focused(), 6);
     }
 
     #[test]
@@ -323,6 +326,20 @@ start_url = \"https://x\"
         assert_eq!(shell.setting_text("volume"), "55");
         press(&mut shell, &[Key::Down, Key::Enter]);
         assert_eq!(shell.setting_text("mute"), "On");
+    }
+
+    #[test]
+    fn the_display_settings_change_from_the_keys_and_a_choice_wraps() {
+        let mut shell = shell();
+        at_row(&mut shell, "Theme");
+        assert_eq!(shell.setting_text("theme"), "Dark");
+        press(&mut shell, &[Key::Right]);
+        assert_eq!(shell.setting_text("theme"), "Light");
+        press(&mut shell, &[Key::Right]);
+        assert_eq!(shell.setting_text("theme"), "Dark");
+        press(&mut shell, &[Key::Down, Key::Enter, Key::Down, Key::Enter]);
+        assert_eq!(shell.setting_text("reduce_motion"), "On");
+        assert_eq!(shell.setting_text("clock_24h"), "Off");
     }
 
     #[test]

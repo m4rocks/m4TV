@@ -29,11 +29,40 @@ pub enum Kind {
         step: i64,
     },
     Toggle,
+    /// One of `options`, held as its index; stepping past either end wraps around.
+    Choice {
+        options: &'static [&'static str],
+    },
+}
+
+/// The group a setting belongs to on the Settings screen and in the Remote. The Network and
+/// System groups hold the device actions the Shell lists itself (hotspot, power, version).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Category {
+    Display,
+    Sound,
+    Network,
+    System,
+}
+
+impl Category {
+    pub const ALL: [Category; 4] =
+        [Category::Display, Category::Sound, Category::Network, Category::System];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Category::Display => "Display",
+            Category::Sound => "Sound",
+            Category::Network => "Network",
+            Category::System => "System",
+        }
+    }
 }
 
 pub struct SettingDef {
     pub key: &'static str,
     pub label: &'static str,
+    pub category: Category,
     pub kind: Kind,
     pub default: Value,
 }
@@ -47,6 +76,7 @@ impl SettingDef {
                 (*min..=*max).contains(&n) && (n - min) % step == 0
             }
             (Kind::Toggle, Value::Bool(_)) => true,
+            (Kind::Choice { options }, Value::Int(n)) => (0..options.len() as i64).contains(&n),
             _ => false,
         }
     }
@@ -54,12 +84,40 @@ impl SettingDef {
 
 pub const SETTINGS: &[SettingDef] = &[
     SettingDef {
+        key: "theme",
+        label: "Theme",
+        category: Category::Display,
+        kind: Kind::Choice { options: &["Dark", "Light"] },
+        default: Value::Int(0),
+    },
+    SettingDef {
+        key: "reduce_motion",
+        label: "Reduce motion",
+        category: Category::Display,
+        kind: Kind::Toggle,
+        default: Value::Bool(false),
+    },
+    SettingDef {
+        key: "clock_24h",
+        label: "24-hour clock",
+        category: Category::Display,
+        kind: Kind::Toggle,
+        default: Value::Bool(true),
+    },
+    SettingDef {
         key: "volume",
         label: "Volume",
+        category: Category::Sound,
         kind: Kind::Range { min: 0, max: 100, step: 5 },
         default: Value::Int(50),
     },
-    SettingDef { key: "mute", label: "Mute", kind: Kind::Toggle, default: Value::Bool(false) },
+    SettingDef {
+        key: "mute",
+        label: "Mute",
+        category: Category::Sound,
+        kind: Kind::Toggle,
+        default: Value::Bool(false),
+    },
 ];
 
 /// The current value of every declared setting.
@@ -83,6 +141,11 @@ impl Settings {
                             Value::Int((*n).clamp(*min, *max))
                         }
                         (Kind::Toggle, Some(Value::Bool(on))) => Value::Bool(*on),
+                        (Kind::Choice { options }, Some(Value::Int(n)))
+                            if (0..options.len() as i64).contains(n) =>
+                        {
+                            Value::Int(*n)
+                        }
                         _ => def.default,
                     };
                     (def.key, value)
@@ -107,6 +170,16 @@ impl Settings {
         self.0[key]
     }
 
+    /// The value of a declared setting as the screens show it: a choice by its name.
+    pub fn text(&self, key: &str) -> String {
+        match (SETTINGS.iter().find(|def| def.key == key), self.get(key)) {
+            (Some(SettingDef { kind: Kind::Choice { options }, .. }), Value::Int(n)) => {
+                options[n as usize].into()
+            }
+            (_, value) => value.to_string(),
+        }
+    }
+
     /// Sets a declared setting to a value it accepts; anything else leaves it as it is.
     pub fn set(&mut self, key: &str, value: Value) {
         if let Some(def) = SETTINGS.iter().find(|def| def.key == key).filter(|d| d.accepts(value)) {
@@ -114,7 +187,7 @@ impl Settings {
         }
     }
 
-    /// Steps a setting up (`direction > 0`) or down. A toggle flips either way.
+    /// Steps a setting up (`direction > 0`) or down. A toggle flips either way and a choice wraps.
     pub fn adjust(&mut self, key: &str, direction: i64) {
         let Some(def) = SETTINGS.iter().find(|def| def.key == key) else {
             return;
@@ -122,6 +195,9 @@ impl Settings {
         let value = match (&def.kind, self.get(key)) {
             (Kind::Range { min, max, step }, Value::Int(n)) => {
                 Value::Int((n + direction.signum() * step).clamp(*min, *max))
+            }
+            (Kind::Choice { options }, Value::Int(n)) => {
+                Value::Int((n + direction.signum()).rem_euclid(options.len() as i64))
             }
             (_, Value::Bool(on)) => Value::Bool(!on),
             (_, value) => value,
@@ -179,6 +255,34 @@ mod tests {
         assert_eq!(settings.get("mute"), Value::Bool(true));
         settings.adjust("mute", 1);
         assert_eq!(settings.get("mute"), Value::Bool(false));
+    }
+
+    #[test]
+    fn a_choice_shows_its_name_wraps_at_its_ends_and_rejects_an_unknown_index() {
+        let path = temp_file("choice");
+        let mut settings = Settings::load(&path);
+        assert_eq!(settings.text("theme"), "Dark");
+        settings.adjust("theme", 1);
+        assert_eq!(settings.text("theme"), "Light");
+        settings.adjust("theme", 1);
+        assert_eq!(settings.text("theme"), "Dark");
+        settings.adjust("theme", -1);
+        assert_eq!(settings.text("theme"), "Light");
+        settings.set("theme", Value::Int(2));
+        assert_eq!(settings.text("theme"), "Light", "an index with no option is refused");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "theme = 9").unwrap();
+        assert_eq!(Settings::load(&path).text("theme"), "Dark");
+    }
+
+    #[test]
+    fn the_display_settings_default_to_dark_motion_on_and_a_24_hour_clock() {
+        let settings = Settings::load(&temp_file("display"));
+        assert_eq!(settings.get("reduce_motion"), Value::Bool(false));
+        assert_eq!(settings.get("clock_24h"), Value::Bool(true));
+        let display: Vec<_> =
+            SETTINGS.iter().filter(|d| d.category == Category::Display).map(|d| d.key).collect();
+        assert_eq!(display, ["theme", "reduce_motion", "clock_24h"]);
     }
 
     #[test]

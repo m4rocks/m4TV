@@ -252,7 +252,7 @@ impl Shell {
 
     /// The displayed value of a declared setting.
     pub fn setting_text(&self, key: &str) -> String {
-        self.settings.get(key).to_string()
+        self.settings.text(key)
     }
 
     /// What the last device action or failed save said, until the next key.
@@ -403,9 +403,13 @@ impl Shell {
                 .map(|def| SettingState {
                     key: def.key,
                     label: def.label,
+                    category: def.category.label(),
                     kind: match def.kind {
                         Kind::Range { min, max, step } => SettingKind::Range { min, max, step },
                         Kind::Toggle => SettingKind::Toggle,
+                        Kind::Choice { options } => {
+                            SettingKind::Choice { options: options.to_vec() }
+                        }
                     },
                     value: self.settings.get(def.key),
                 })

@@ -938,25 +938,43 @@ fn the_remote_lists_every_declared_setting_and_changes_converge_both_ways() {
     let declared: Vec<(&str, &str)> =
         m4tv_settings::SETTINGS.iter().map(|d| (d.key, d.label)).collect();
     assert_eq!(listed, declared);
-    let volume = &first["settings"][0];
+    let setting = |key: &str| first["settings"].as_array().unwrap().iter().find(|s| s["key"] == key).unwrap().clone();
+    let volume = setting("volume");
     assert_eq!(volume["kind"], json!({"type": "range", "min": 0, "max": 100, "step": 5}));
     assert_eq!(volume["value"], 50);
-    assert_eq!(first["settings"][1]["kind"], json!({"type": "toggle"}));
-    assert_eq!(first["settings"][1]["value"], false);
+    assert_eq!(volume["category"], "Sound");
+    assert_eq!(setting("mute")["kind"], json!({"type": "toggle"}));
+    assert_eq!(setting("mute")["value"], false);
+    // The display settings from ADR 0005 reach the phone with their category.
+    let theme = setting("theme");
+    assert_eq!(theme["kind"], json!({"type": "choice", "options": ["Dark", "Light"]}));
+    assert_eq!((theme["value"].clone(), theme["category"].clone()), (json!(0), json!("Display")));
+    assert_eq!(setting("reduce_motion")["value"], false);
+    assert_eq!(setting("clock_24h")["value"], true);
 
     // Write from the phone: the Shell takes it and the push follows.
     let (status, _) =
         rig.drive(api.put("/api/settings/volume", Some(&token), json!({"value": 70})));
     assert_eq!(status, 204);
-    rig.drive(state_where(&mut ws, |s| s["settings"][0]["value"] == 70 && s["volume"] == 70));
+    rig.drive(state_where(&mut ws, |s| value_of(s, "volume") == 70 && s["volume"] == 70));
     let (status, _) =
         rig.drive(api.put("/api/settings/mute", Some(&token), json!({"value": true})));
     assert_eq!(status, 204);
-    rig.drive(state_where(&mut ws, |s| s["settings"][1]["value"] == true && s["muted"] == true));
+    rig.drive(state_where(&mut ws, |s| value_of(s, "mute") == true && s["muted"] == true));
+    let (status, _) = rig.drive(api.put("/api/settings/theme", Some(&token), json!({"value": 1})));
+    assert_eq!(status, 204);
+    rig.drive(state_where(&mut ws, |s| value_of(s, "theme") == 1));
+    assert_eq!(rig.shell.setting_text("theme"), "Light");
 
     // Write from the Shell: the phone sees it without asking.
     rig.shell.press(Key::VolumeUp);
-    rig.drive(state_where(&mut ws, |s| s["settings"][0]["value"] == 75));
+    rig.drive(state_where(&mut ws, |s| value_of(s, "volume") == 75));
+}
+
+/// The value of the setting `key` in a pushed live state.
+fn value_of(state: &Value, key: &str) -> Value {
+    let settings = state["settings"].as_array().unwrap();
+    settings.iter().find(|s| s["key"] == key).unwrap()["value"].clone()
 }
 
 #[test]
@@ -974,6 +992,7 @@ fn the_remote_refuses_settings_the_shell_would_not_take() {
     assert_eq!(rig.drive(put("volume", json!({"value": 52}))).0, 400, "off the step");
     assert_eq!(rig.drive(put("volume", json!({"value": true}))).0, 400);
     assert_eq!(rig.drive(put("mute", json!({"value": 1}))).0, 400);
+    assert_eq!(rig.drive(put("theme", json!({"value": 2}))).0, 400, "no third theme");
     assert_eq!(rig.drive(api.put("/api/settings/volume", None, json!({"value": 60}))).0, 401);
     assert_eq!(rig.drive(api.get("/api/state", Some(&token))).1["volume"], 50);
 }

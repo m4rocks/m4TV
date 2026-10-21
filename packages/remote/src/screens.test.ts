@@ -1,5 +1,6 @@
 import { expect, test } from "vitest";
-import { moved, setupMessage, tabAfter, tabsFor } from "./screens";
+import type { SettingState } from "./protocol/api";
+import { byCategory, moved, setupMessage, tabAfter, tabsFor } from "./screens";
 
 test("the Wi-Fi tab exists, and comes first, only while the TV is setting itself up", () => {
   expect(tabsFor(false)).toEqual(["remote", "apps", "settings"]);
@@ -24,4 +25,19 @@ test("joining and joined say what to do next, and the other phases say nothing",
   expect(setupMessage({ phase: "joined", address: "10.0.0.7" })).toContain("https://10.0.0.7");
   expect(setupMessage({ phase: "hotspot", reason: null, networks: [] })).toBeNull();
   expect(setupMessage({ phase: "off" })).toBeNull();
+});
+
+test("settings are grouped by category in the order the declaration lists them", () => {
+  const setting = (key: string, category: string): SettingState => ({
+    key,
+    label: key,
+    category,
+    kind: { type: "toggle" },
+    value: false,
+  });
+  const groups = byCategory([setting("a", "Display"), setting("b", "Sound"), setting("c", "Display")]);
+  expect(groups.map(([category, rows]) => [category, rows.map((s) => s.key)])).toEqual([
+    ["Display", ["a", "c"]],
+    ["Sound", ["b"]],
+  ]);
 });
