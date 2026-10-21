@@ -69,6 +69,7 @@ pub(super) fn router(shared: Shared, hotspot: bool) -> Router {
         .route("/apps/order", put(order))
         .route("/text", post(text))
         .route("/settings/{key}", put(setting))
+        .route("/settings/{key}/step", post(step))
         .route("/wifi/join", post(join))
         .layer(middleware::from_fn_with_state(shared.clone(), authenticate));
     let router = Router::new().route("/api/ws", get(ws)).nest("/api", api);
@@ -287,6 +288,29 @@ async fn setting(
 }
 
 #[derive(Deserialize, TS)]
+struct StepRequest {
+    /// 1 or -1.
+    #[ts(type = "number")]
+    direction: i64,
+}
+
+/// A step, not a value: the Shell applies it to its own current value, so quick taps on a phone
+/// that has not heard back yet all count.
+async fn step(
+    State(shared): State<Shared>,
+    Path(key): Path<String>,
+    Json(request): Json<StepRequest>,
+) -> Response {
+    if !SETTINGS.iter().any(|def| def.key == key) {
+        return refuse(StatusCode::NOT_FOUND, "no such setting");
+    }
+    if request.direction.abs() != 1 {
+        return refuse(StatusCode::BAD_REQUEST, "a step is 1 or -1");
+    }
+    send(&shared, Command::Step(key, request.direction))
+}
+
+#[derive(Deserialize, TS)]
 struct WifiJoinRequest {
     ssid: String,
     #[serde(default)]
@@ -429,6 +453,7 @@ mod tests {
             SettingState::decl(&cfg),
             SettingKind::decl(&cfg),
             SettingRequest::decl(&cfg),
+            StepRequest::decl(&cfg),
             SetupView::decl(&cfg),
             WifiView::decl(&cfg),
             WifiJoinRequest::decl(&cfg),

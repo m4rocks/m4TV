@@ -31,7 +31,12 @@ settings: Array<SettingState>,
 /**
  * Whether the TV is setting itself up on the Setup hotspot, and how that is going.
  */
-setup: SetupView, };
+setup: SetupView, 
+/**
+ * What the last device action or failed save said, until the next key: a phone cannot see
+ * the TV's screen, so a save that failed would otherwise go unnoticed.
+ */
+notice: string | null, };
 
 export type PairRequest = { pin: string, name: string, };
 
@@ -50,6 +55,12 @@ export type SettingState = { key: string, label: string, kind: SettingKind, valu
 export type SettingKind = { "type": "range", min: number, max: number, step: number, } | { "type": "toggle" };
 
 export type SettingRequest = { value: boolean | number, };
+
+export type StepRequest = { 
+/**
+ * 1 or -1.
+ */
+direction: number, };
 
 export type SetupView = { "phase": "off" } | { "phase": "hotspot", reason: string | null, networks: Array<WifiView>, } | { "phase": "joining", ssid: string, } | { "phase": "joined", address: string, };
 

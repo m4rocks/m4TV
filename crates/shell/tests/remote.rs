@@ -1274,3 +1274,45 @@ fn only_sixteen_phones_can_pair_on_the_hotspot() {
     let (status, body) = rig.drive(http.post("/api/pair/hotspot", None, json!({"name": "17th"})));
     assert_eq!(status, 409, "{body}");
 }
+
+#[test]
+fn quick_steps_from_a_phone_all_count_because_the_shell_applies_them_to_its_own_value() {
+    let mut rig = Rig::new();
+    let api = rig.api();
+    let token = rig.pair("Pixel");
+    let step = |key: &str, direction: i64| {
+        let (api, token, path) = (&api, &token, format!("/api/settings/{key}/step"));
+        async move { api.post(&path, Some(token), json!({"direction": direction})).await.0 }
+    };
+
+    // Three taps before the phone has heard back from any: none is lost.
+    for _ in 0..3 {
+        assert_eq!(rig.drive(step("volume", 1)), 204);
+    }
+    assert_eq!(rig.drive(step("mute", 1)), 204);
+    rig.shell.tick(Duration::ZERO);
+    let state = rig.drive(api.get("/api/state", Some(&token))).1;
+    assert_eq!((state["volume"].as_i64(), state["muted"].as_bool()), (Some(65), Some(true)));
+
+    assert_eq!(rig.drive(step("nope", 1)), 404);
+    assert_eq!(rig.drive(step("volume", 0)), 400);
+    assert_eq!(rig.drive(step("volume", 5)), 400);
+}
+
+#[test]
+fn a_setting_the_shell_could_not_save_is_reported_to_the_phone() {
+    let mut rig = Rig::new();
+    let api = rig.api();
+    let token = rig.pair("Pixel");
+    let mut ws = rig.drive(api.connect(&token)).unwrap();
+    rig.drive(state_where(&mut ws, |s| s["notice"].is_null()));
+
+    // A directory where the settings file belongs: the Shell cannot replace it.
+    std::fs::create_dir_all(rig.dir.join("settings.toml")).unwrap();
+    let (status, _) =
+        rig.drive(api.put("/api/settings/volume", Some(&token), json!({"value": 70})));
+    assert_eq!(status, 204);
+    rig.drive(state_where(&mut ws, |s| {
+        s["notice"].as_str().is_some_and(|n| n.contains("Could not save settings"))
+    }));
+}

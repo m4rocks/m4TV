@@ -48,6 +48,9 @@ pub struct LiveState {
     pub settings: Vec<SettingState>,
     /// Whether the TV is setting itself up on the Setup hotspot, and how that is going.
     pub setup: SetupView,
+    /// What the last device action or failed save said, until the next key: a phone cannot see
+    /// the TV's screen, so a save that failed would otherwise go unnoticed.
+    pub notice: Option<String>,
 }
 
 /// The Setup hotspot flow, as a phone on the hotspot sees it.
@@ -113,6 +116,8 @@ pub enum Command {
     Order(Vec<String>),
     Text(String),
     Setting(String, Value),
+    /// Moves a setting one step up (1) or down (-1) from whatever it is now.
+    Step(String, i64),
     Join(JoinRequest),
 }
 
