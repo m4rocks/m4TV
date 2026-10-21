@@ -1092,8 +1092,9 @@ fn a_phone_on_the_hotspot_picks_a_wifi_and_the_tv_hands_over_to_its_new_address(
     assert_eq!(fragment_field(&payload, "fp"), rig.fingerprint);
     assert_eq!(setup_state(&mut rig, &token), json!({"phase": "joined", "address": "10.0.0.7"}));
 
-    // Then the hotspot drops, listener included.
-    assert!(rig.os.hotspot().is_some());
+    // The join took the radio from the hotspot; its listener stays up a few seconds for the phone
+    // and then drops.
+    assert_eq!(rig.os.hotspot(), None);
     rig.shell.tick(Duration::from_secs(5));
     assert_eq!(rig.os.hotspot(), None);
     let http = rig.hotspot_api();
@@ -1188,6 +1189,7 @@ fn no_address_within_thirty_seconds_counts_as_a_failed_join() {
 
     rig.shell.tick(Duration::from_secs(29));
     assert_eq!(setup_state(&mut rig, &token)["phase"], "joining");
+    assert_eq!(rig.os.hotspot(), None, "joining takes the radio from the hotspot");
     rig.shell.tick(Duration::from_secs(2));
     let setup = setup_state(&mut rig, &token);
     assert_eq!(setup["phase"], "hotspot");
@@ -1200,6 +1202,15 @@ fn settings_starts_the_hotspot_on_demand_except_on_ethernet() {
     let mut rig = Rig::new();
     let row = rig.shell.settings_rows().iter().position(|r| r.label() == "Setup hotspot").unwrap();
     open_settings_row(&mut rig, row);
+    // On Wi-Fi the first Enter only warns that the TV will be disconnected.
+    rig.shell.press(Key::Enter);
+    assert_eq!(rig.os.hotspot(), None);
+    assert!(rig.shell.notice().unwrap().contains("leaves its Wi-Fi"));
+    // Another key withdraws the warning, so the next Enter warns again.
+    rig.shell.press(Key::Down);
+    rig.shell.press(Key::Up);
+    rig.shell.press(Key::Enter);
+    assert_eq!(rig.os.hotspot(), None);
     rig.shell.press(Key::Enter);
     assert!(rig.os.hotspot().is_some());
     hotspot_overlay(&rig);
@@ -1326,6 +1337,7 @@ fn a_phone_with_the_remote_open_clears_the_hotspot_panel_and_back_leaves_it_conn
     let mut rig = Rig::new();
     let row = rig.shell.settings_rows().iter().position(|r| r.label() == "Setup hotspot").unwrap();
     open_settings_row(&mut rig, row);
+    rig.shell.press(Key::Enter); // the warning
     rig.shell.press(Key::Enter);
     hotspot_overlay(&rig);
 
@@ -1367,7 +1379,7 @@ fn a_phone_that_paired_just_before_the_join_does_not_end_the_handover() {
         "{:?}",
         rig.shell.overlay()
     );
-    assert!(rig.os.hotspot().is_some(), "the phone is still being told");
+    assert_eq!(rig.os.hotspot(), None, "the join took the radio, the phone is told by the listener");
 
     // Ending the handover early (a phone paired at the new address) takes the hotspot with it.
     let api = rig.api();

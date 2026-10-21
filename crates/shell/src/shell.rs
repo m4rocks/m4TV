@@ -184,6 +184,9 @@ pub struct Shell {
     /// How many phones were paired when the Shell last looked.
     phones_seen: usize,
     setup: Setup,
+    /// The Settings row for the on-demand hotspot warned that it disconnects the TV, and the very
+    /// next key decides whether it starts.
+    hotspot_warned: bool,
 }
 
 impl Shell {
@@ -203,6 +206,7 @@ impl Shell {
             pairing_requested: false,
             phones_seen: 0,
             setup: Setup::Off,
+            hotspot_warned: false,
         }
     }
 
@@ -536,6 +540,7 @@ impl Shell {
 
     fn press_settings(&mut self, key: Key) {
         self.notice = None;
+        let warned = std::mem::take(&mut self.hotspot_warned);
         let rows = self.settings_rows();
         match key {
             Key::Back | Key::Home => self.screen = Screen::Home,
@@ -548,7 +553,7 @@ impl Shell {
                     self.adjust(def.key, if key == Key::Left { -1 } else { 1 });
                 }
                 Row::Pair if key == Key::Enter => self.pairing_requested = true,
-                Row::Hotspot if key == Key::Enter => self.ask_for_hotspot(),
+                Row::Hotspot if key == Key::Enter => self.ask_for_hotspot(warned),
                 Row::Phone(phone) if key == Key::Enter => self.revoke(phone.id),
                 Row::Reboot if key == Key::Enter => self.notice = Some(self.os.reboot()),
                 Row::PowerOff if key == Key::Enter => self.notice = Some(self.os.power_off()),

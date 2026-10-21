@@ -234,13 +234,19 @@ impl Shell {
     }
 
     /// Settings starts the hotspot, and stops one it started. A TV on Ethernet has no use for
-    /// one, and one that came up because there is no network goes when there is one.
-    pub(super) fn ask_for_hotspot(&mut self) {
+    /// one, and one that came up because there is no network goes when there is one. A TV on
+    /// Wi-Fi is warned first (ADR 0007) and starts it on the next Enter, `warned`.
+    pub(super) fn ask_for_hotspot(&mut self, warned: bool) {
         if self.os.network() == Network::Ethernet {
             self.notice = Some("Ethernet is connected, so there is no Setup hotspot".into());
             return;
         }
         match self.setup {
+            Setup::Off if matches!(self.os.network(), Network::Wifi { .. }) && !warned => {
+                self.notice =
+                    Some("The TV leaves its Wi-Fi while the hotspot is up. Enter to start".into());
+                self.hotspot_warned = true;
+            }
             Setup::Off => self.start_hotspot(true),
             Setup::Hotspot { session: Session { on_demand: true, .. }, .. } => self.stop_hotspot(),
             _ => {}
