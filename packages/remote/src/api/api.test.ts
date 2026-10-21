@@ -42,3 +42,11 @@ test("a revoked token is reported as such", async () => {
   const { fetch } = fetchStub(401, { error: "pair this phone first" });
   await expect(createApi("t", fetch).key("Enter")).rejects.toMatchObject({ unpaired: true });
 });
+
+test("a setting is a PUT of its value to its own path", async () => {
+  const { fetch, calls } = fetchStub(204);
+  await createApi("t", fetch).setting("volume", 70);
+  expect(calls[0].init.method).toBe("PUT");
+  expect(calls[0].url).toBe("/api/settings/volume");
+  expect(calls[0].init.body).toBe('{"value":70}');
+});

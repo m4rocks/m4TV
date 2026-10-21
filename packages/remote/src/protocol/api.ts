@@ -23,7 +23,11 @@ apps: Array<AppSummary>, volume: number, muted: boolean,
 /**
  * Whether the open App has an editable field focused.
  */
-editable: boolean, };
+editable: boolean, 
+/**
+ * Every declared setting, in the declaration's order: the Remote builds its screens from this.
+ */
+settings: Array<SettingState>, };
 
 export type PairRequest = { pin: string, name: string, };
 
@@ -36,4 +40,10 @@ export type LaunchRequest = { app: string, };
 export type OrderRequest = { apps: Array<string>, };
 
 export type TextRequest = { text: string, };
+
+export type SettingState = { key: string, label: string, kind: SettingKind, value: boolean | number, };
+
+export type SettingKind = { "type": "range", min: number, max: number, step: number, } | { "type": "toggle" };
+
+export type SettingRequest = { value: boolean | number, };
 

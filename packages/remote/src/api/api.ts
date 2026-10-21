@@ -31,5 +31,7 @@ export function createApi(token: string, fetcher: typeof fetch = fetch) {
     launch: (app: string) => call("POST", "/launch", { app }),
     order: (apps: string[]) => call("PUT", "/apps/order", { apps }),
     text: (text: string) => call("POST", "/text", { text }),
+    setting: (key: string, value: boolean | number) =>
+      call("PUT", `/settings/${encodeURIComponent(key)}`, { value }),
   };
 }

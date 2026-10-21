@@ -12,7 +12,7 @@ use axum::{
     Json, Router,
     body::Bytes,
     extract::{
-        Query, Request, State,
+        Path, Query, Request, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
     http::{
@@ -23,6 +23,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post, put},
 };
+use m4tv_settings::{SETTINGS, Value};
 use rust_embed::RustEmbed;
 use serde::Deserialize;
 use serde_json::json;
@@ -61,6 +62,7 @@ pub(super) fn router(shared: Shared) -> Router {
         .route("/launch", post(launch))
         .route("/apps/order", put(order))
         .route("/text", post(text))
+        .route("/settings/{key}", put(setting))
         .layer(middleware::from_fn_with_state(shared.clone(), authenticate));
     Router::new()
         .route("/api/pair", post(pair))
@@ -77,7 +79,9 @@ pub(super) fn router(shared: Shared) -> Router {
 async fn web(headers: HeaderMap, uri: Uri) -> Response {
     let path = uri.path().trim_start_matches('/');
     let path = if path.is_empty() { "index.html" } else { path };
-    let Some(file) = Web::get(path) else { return StatusCode::NOT_FOUND.into_response() };
+    let Some(file) = Web::get(path) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
     if path != "index.html" {
         return ([(CONTENT_TYPE, file.metadata.mimetype().to_string())], file.data.into_owned())
             .into_response();
@@ -224,6 +228,26 @@ async fn text(State(shared): State<Shared>, Json(request): Json<TextRequest>) ->
     send(&shared, Command::Text(request.text))
 }
 
+#[derive(Deserialize, TS)]
+struct SettingRequest {
+    #[ts(type = "boolean | number")]
+    value: Value,
+}
+
+async fn setting(
+    State(shared): State<Shared>,
+    Path(key): Path<String>,
+    Json(request): Json<SettingRequest>,
+) -> Response {
+    let Some(def) = SETTINGS.iter().find(|def| def.key == key) else {
+        return refuse(StatusCode::NOT_FOUND, "no such setting");
+    };
+    if !def.accepts(request.value) {
+        return refuse(StatusCode::BAD_REQUEST, "that value is not allowed for this setting");
+    }
+    send(&shared, Command::Setting(key, request.value))
+}
+
 #[derive(Deserialize)]
 struct WsQuery {
     token: String,
@@ -298,7 +322,7 @@ mod tests {
     use ts_rs::{Config, TS};
 
     use super::*;
-    use crate::remote::AppSummary;
+    use crate::remote::{AppSummary, SettingKind, SettingState};
 
     /// The TypeScript types the Remote web app uses, generated from the Rust ones. Stale types
     /// fail this test; `UPDATE_TS=1 cargo test -p m4tv-shell typescript` rewrites them.
@@ -318,6 +342,9 @@ mod tests {
             LaunchRequest::decl(&cfg),
             OrderRequest::decl(&cfg),
             TextRequest::decl(&cfg),
+            SettingState::decl(&cfg),
+            SettingKind::decl(&cfg),
+            SettingRequest::decl(&cfg),
         ] {
             generated += &format!("export {decl}\n\n");
         }

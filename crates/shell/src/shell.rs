@@ -8,7 +8,7 @@ use m4tv_settings::{Kind, SETTINGS, SettingDef, Settings, Value};
 use crate::{
     apps::AppDefinition,
     engine::{Engine, Frame},
-    remote::{AppSummary, Command, LiveState, Phone, Remote},
+    remote::{AppSummary, Command, LiveState, Phone, Remote, SettingKind, SettingState},
 };
 
 /// A TV-remote key. The Dev host keyboard and the Remote both produce these.
@@ -266,6 +266,7 @@ impl Shell {
                 Command::Key(key) => self.press(key),
                 Command::Launch(id) => self.launch(&id),
                 Command::Order(ids) => self.reorder(&ids),
+                Command::Setting(key, value) => self.set(&key, value),
                 Command::Text(text) => {
                     if self.editable_focused() {
                         self.engine.type_text(&text);
@@ -282,7 +283,9 @@ impl Shell {
 
     /// Opens an App by id, closing the one that is open.
     fn launch(&mut self, id: &str) {
-        let Some(app) = self.apps.iter().find(|app| app.id == id) else { return };
+        let Some(app) = self.apps.iter().find(|app| app.id == id) else {
+            return;
+        };
         if matches!(self.screen, Screen::App(_)) {
             self.engine.close();
         }
@@ -343,6 +346,18 @@ impl Shell {
             volume: self.number("volume"),
             muted: self.number("mute") != 0,
             editable: self.editable_focused(),
+            settings: SETTINGS
+                .iter()
+                .map(|def| SettingState {
+                    key: def.key,
+                    label: def.label,
+                    kind: match def.kind {
+                        Kind::Range { min, max, step } => SettingKind::Range { min, max, step },
+                        Kind::Toggle => SettingKind::Toggle,
+                    },
+                    value: self.settings.get(def.key),
+                })
+                .collect(),
         }
     }
 
@@ -407,6 +422,16 @@ impl Shell {
     /// Steps a setting and stores it, saying so if it could not be stored.
     fn adjust(&mut self, key: &str, direction: i64) {
         self.settings.adjust(key, direction);
+        self.store();
+    }
+
+    /// Sets a setting a phone asked for and stores it.
+    fn set(&mut self, key: &str, value: Value) {
+        self.settings.set(key, value);
+        self.store();
+    }
+
+    fn store(&mut self) {
         if let Err(e) = self.settings.save(&self.os.settings_path()) {
             self.notice = Some(format!("Could not save settings: {e}"));
         }

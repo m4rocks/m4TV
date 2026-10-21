@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { CommandError, createApi } from "./api/api";
 import { connectLive, type Link } from "./live/live";
 import type { LiveState } from "./protocol/api";
+import { stepped } from "./settings/settings";
 
 const pad = "rounded-lg bg-gray-200 p-4 text-xl active:bg-gray-300 disabled:opacity-40";
 
@@ -10,7 +11,7 @@ export function Control({ token, onUnpaired }: { token: string; onUnpaired: () =
   const [live, setLive] = useState<LiveState | null>(null);
   const [link, setLink] = useState<Link>("connecting");
   const [error, setError] = useState("");
-  const [tab, setTab] = useState<"remote" | "apps">("remote");
+  const [tab, setTab] = useState<"remote" | "apps" | "settings">("remote");
 
   useEffect(() => {
     const scheme = location.protocol === "https:" ? "wss" : "ws";
@@ -79,12 +80,14 @@ export function Control({ token, onUnpaired }: { token: string; onUnpaired: () =
           </div>
           {live?.editable && <TextBox onSend={(text) => run(api.text(text))} />}
         </div>
-      ) : (
+      ) : tab === "apps" ? (
         <Apps live={live} onLaunch={(id) => run(api.launch(id))} onOrder={(ids) => run(api.order(ids))} />
+      ) : (
+        <Settings live={live} onChange={(key, value) => run(api.setting(key, value))} />
       )}
 
       <nav className="mt-auto flex gap-2" aria-label="Sections">
-        {(["remote", "apps"] as const).map((name) => (
+        {(["remote", "apps", "settings"] as const).map((name) => (
           <button
             key={name}
             aria-current={tab === name}
@@ -157,6 +160,54 @@ function Apps({
           >
             ↓
           </button>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/** Built from the Shell's declaration, so a new setting needs no code here. */
+function Settings({
+  live,
+  onChange,
+}: {
+  live: LiveState | null;
+  onChange: (key: string, value: boolean | number) => void;
+}) {
+  if (!live) return <p>Waiting for the TV…</p>;
+  return (
+    <ul className="space-y-2">
+      {live.settings.map((setting) => (
+        <li key={setting.key} className="flex items-center gap-2">
+          <span className="flex-1 text-lg">{setting.label}</span>
+          {setting.kind.type === "toggle" ? (
+            <button
+              className={pad}
+              role="switch"
+              aria-checked={setting.value as boolean}
+              onClick={() => onChange(setting.key, stepped(setting, 1))}
+            >
+              {setting.value ? "On" : "Off"}
+            </button>
+          ) : (
+            <>
+              <button
+                className={pad}
+                aria-label={`${setting.label} down`}
+                onClick={() => onChange(setting.key, stepped(setting, -1))}
+              >
+                −
+              </button>
+              <span className="w-12 text-center text-lg">{String(setting.value)}</span>
+              <button
+                className={pad}
+                aria-label={`${setting.label} up`}
+                onClick={() => onChange(setting.key, stepped(setting, 1))}
+              >
+                +
+              </button>
+            </>
+          )}
         </li>
       ))}
     </ul>

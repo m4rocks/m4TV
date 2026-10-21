@@ -876,3 +876,61 @@ fn the_tv_announces_itself_over_mdns() {
     let info = found.expect("the TV was found by mDNS");
     assert_eq!((info.get_hostname(), info.get_port()), ("m4tv.local.", port));
 }
+
+#[test]
+fn the_remote_lists_every_declared_setting_and_changes_converge_both_ways() {
+    let mut rig = Rig::new();
+    let api = rig.api();
+    let token = rig.pair("Pixel");
+    let mut ws = rig.drive(api.connect(&token)).unwrap();
+
+    // Read: one entry per declaration, in its order, with the same options as the Shell.
+    let first = rig.drive(state_where(&mut ws, |_| true));
+    let listed: Vec<(&str, &str)> = first["settings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| (s["key"].as_str().unwrap(), s["label"].as_str().unwrap()))
+        .collect();
+    let declared: Vec<(&str, &str)> =
+        m4tv_settings::SETTINGS.iter().map(|d| (d.key, d.label)).collect();
+    assert_eq!(listed, declared);
+    let volume = &first["settings"][0];
+    assert_eq!(volume["kind"], json!({"type": "range", "min": 0, "max": 100, "step": 5}));
+    assert_eq!(volume["value"], 50);
+    assert_eq!(first["settings"][1]["kind"], json!({"type": "toggle"}));
+    assert_eq!(first["settings"][1]["value"], false);
+
+    // Write from the phone: the Shell takes it and the push follows.
+    let (status, _) =
+        rig.drive(api.put("/api/settings/volume", Some(&token), json!({"value": 70})));
+    assert_eq!(status, 204);
+    rig.drive(state_where(&mut ws, |s| s["settings"][0]["value"] == 70 && s["volume"] == 70));
+    let (status, _) =
+        rig.drive(api.put("/api/settings/mute", Some(&token), json!({"value": true})));
+    assert_eq!(status, 204);
+    rig.drive(state_where(&mut ws, |s| s["settings"][1]["value"] == true && s["muted"] == true));
+
+    // Write from the Shell: the phone sees it without asking.
+    rig.shell.press(Key::VolumeUp);
+    rig.drive(state_where(&mut ws, |s| s["settings"][0]["value"] == 75));
+}
+
+#[test]
+fn the_remote_refuses_settings_the_shell_would_not_take() {
+    let mut rig = Rig::new();
+    let api = rig.api();
+    let token = rig.pair("Pixel");
+    let put = |key: &str, body: Value| {
+        let (api, token, path) = (&api, &token, format!("/api/settings/{key}"));
+        async move { api.put(&path, Some(token), body).await }
+    };
+
+    assert_eq!(rig.drive(put("nope", json!({"value": 1}))).0, 404);
+    assert_eq!(rig.drive(put("volume", json!({"value": 101}))).0, 400);
+    assert_eq!(rig.drive(put("volume", json!({"value": 52}))).0, 400, "off the step");
+    assert_eq!(rig.drive(put("volume", json!({"value": true}))).0, 400);
+    assert_eq!(rig.drive(put("mute", json!({"value": 1}))).0, 400);
+    assert_eq!(rig.drive(api.put("/api/settings/volume", None, json!({"value": 60}))).0, 401);
+    assert_eq!(rig.drive(api.get("/api/state", Some(&token))).1["volume"], 50);
+}

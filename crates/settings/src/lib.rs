@@ -5,7 +5,7 @@ use std::{collections::BTreeMap, fmt, io, path::Path};
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Value {
     Bool(bool),
@@ -36,6 +36,20 @@ pub struct SettingDef {
     pub label: &'static str,
     pub kind: Kind,
     pub default: Value,
+}
+
+impl SettingDef {
+    /// Whether `value` is one this setting can hold: the right type, and for a range inside it
+    /// and on a step.
+    pub fn accepts(&self, value: Value) -> bool {
+        match (&self.kind, value) {
+            (Kind::Range { min, max, step }, Value::Int(n)) => {
+                (*min..=*max).contains(&n) && (n - min) % step == 0
+            }
+            (Kind::Toggle, Value::Bool(_)) => true,
+            _ => false,
+        }
+    }
 }
 
 pub const SETTINGS: &[SettingDef] = &[
@@ -93,9 +107,18 @@ impl Settings {
         self.0[key]
     }
 
+    /// Sets a declared setting to a value it accepts; anything else leaves it as it is.
+    pub fn set(&mut self, key: &str, value: Value) {
+        if let Some(def) = SETTINGS.iter().find(|def| def.key == key).filter(|d| d.accepts(value)) {
+            self.0.insert(def.key, value);
+        }
+    }
+
     /// Steps a setting up (`direction > 0`) or down. A toggle flips either way.
     pub fn adjust(&mut self, key: &str, direction: i64) {
-        let Some(def) = SETTINGS.iter().find(|def| def.key == key) else { return };
+        let Some(def) = SETTINGS.iter().find(|def| def.key == key) else {
+            return;
+        };
         let value = match (&def.kind, self.get(key)) {
             (Kind::Range { min, max, step }, Value::Int(n)) => {
                 Value::Int((n + direction.signum() * step).clamp(*min, *max))

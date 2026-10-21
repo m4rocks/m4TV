@@ -15,6 +15,7 @@ use std::{
 };
 
 use axum_server::tls_rustls::RustlsConfig;
+use m4tv_settings::Value;
 use serde::Serialize;
 use tokio::sync::{mpsc, watch};
 use ts_rs::TS;
@@ -42,6 +43,31 @@ pub struct LiveState {
     pub muted: bool,
     /// Whether the open App has an editable field focused.
     pub editable: bool,
+    /// Every declared setting, in the declaration's order: the Remote builds its screens from this.
+    pub settings: Vec<SettingState>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+pub struct SettingState {
+    pub key: &'static str,
+    pub label: &'static str,
+    pub kind: SettingKind,
+    #[ts(type = "boolean | number")]
+    pub value: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum SettingKind {
+    Range {
+        #[ts(type = "number")]
+        min: i64,
+        #[ts(type = "number")]
+        max: i64,
+        #[ts(type = "number")]
+        step: i64,
+    },
+    Toggle,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
@@ -57,6 +83,7 @@ pub enum Command {
     Launch(String),
     Order(Vec<String>),
     Text(String),
+    Setting(String, Value),
 }
 
 /// The running Remote server, held by the Shell. Dropping it stops the server.
