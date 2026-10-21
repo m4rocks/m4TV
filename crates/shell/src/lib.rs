@@ -5,6 +5,11 @@ pub mod engine;
 pub mod remote;
 pub mod shell;
 
+/// The design tokens of ADR 0005 (`design/tokens.json`), turned into constants by build.rs.
+pub mod tokens {
+    include!(concat!(env!("OUT_DIR"), "/tokens.rs"));
+}
+
 #[cfg(test)]
 mod tests {
     use super::apps::{built_in_apps, page_script, parse_catalog};

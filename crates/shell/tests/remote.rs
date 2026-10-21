@@ -637,6 +637,24 @@ fn the_remote_web_app_is_served_with_a_landing_page_that_needs_no_javascript() {
 }
 
 #[test]
+fn inter_is_served_over_https_and_over_the_plain_http_hotspot() {
+    let mut rig = Rig::offline();
+    let https = rig.api();
+    let hotspot = rig.hotspot_api();
+    for file in ["Inter-Regular-latin.woff2", "Inter-Bold-latin.woff2", "OFL.txt"] {
+        let path = format!("/fonts/{file}");
+        for (listener, api) in [("https", &https), ("hotspot", &hotspot)] {
+            let (status, kind, body) = rig.drive(api.page(&path));
+            let wanted = if file.ends_with(".woff2") { "font/woff2" } else { "text/plain" };
+            assert_eq!((status, kind.as_str()), (200, wanted), "{file} on {listener}");
+            if file.ends_with(".woff2") {
+                assert!(body.starts_with("wOF2"), "{file} on {listener} is not a WOFF2 file");
+            }
+        }
+    }
+}
+
+#[test]
 fn an_unpaired_client_is_refused() {
     let mut rig = Rig::new();
     let api = rig.api();
