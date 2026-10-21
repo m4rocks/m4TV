@@ -235,6 +235,12 @@ async fn the_host_reports_an_editable_field_and_whether_the_page_can_go_back() {
     host.say(json!({"t": "state", "session": session, "can_go_back": true, "editable": true})).await;
     until("the state", || engine.editable_focused() && engine.can_go_back()).await;
 
+    // A host that dies takes its page's state with it.
+    drop(host);
+    until("the state to clear", || !engine.editable_focused() && !engine.can_go_back()).await;
+    let mut host = connect(&rig.endpoint()).await;
+    assert_eq!(host.next().await["t"], "launch");
+
     // Another App's page has no say once this one is closed, and a new App starts clean.
     engine.close();
     host.say(json!({"t": "state", "session": session, "can_go_back": true, "editable": true})).await;

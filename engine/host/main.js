@@ -60,6 +60,8 @@ function closePage() {
   page = null;
   editable = false;
   if (!window.isDestroyed()) window.destroy();
+  // The App's frames go with its window.
+  for (let n = 0; n < SLOTS; n++) fs.rmSync(path.join(M4TV_FRAMES, `frame-${n}.bgra`), { force: true });
 }
 
 function launch({ session: id, app: definition, width, height }) {

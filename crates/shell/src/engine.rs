@@ -79,6 +79,12 @@ impl<B> Session<B> {
         self.browser.take()
     }
 
+    /// Forgets what the page said about itself, as when its engine process died. The last frame
+    /// stays up until the page paints again.
+    pub fn forget_page_state(&mut self) {
+        self.editable = false;
+    }
+
     /// Whether `session` is the one that is open.
     pub fn is_current(&self, session: u64) -> bool {
         self.open && session == self.current

@@ -345,7 +345,13 @@ async fn supervise(config: &EngineConfig, mut endpoint: Endpoint, shared: &Share
                     }
                     status = host.wait() => eprintln!("the Engine host exited ({status:?})"),
                 }
-                shared.state.lock().unwrap().connected = false;
+                {
+                    let mut state = shared.state.lock().unwrap();
+                    state.connected = false;
+                    // The page is gone with its host and comes back on the next one.
+                    state.can_go_back = false;
+                    state.session.forget_page_state();
+                }
                 let _ = host.kill().await;
                 shared.state.lock().unwrap().host = None;
             }
