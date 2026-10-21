@@ -1,3 +1,17 @@
+/* Inter, Latin only (ADR 0005); the Remote server serves it on the hotspot's plain HTTP too. */
+@font-face {
+  font-family: "Inter";
+  font-weight: 400;
+  font-display: swap;
+  src: url("/fonts/Inter-Regular-latin.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Inter";
+  font-weight: 700;
+  font-display: swap;
+  src: url("/fonts/Inter-Bold-latin.woff2") format("woff2");
+}
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;

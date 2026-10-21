@@ -637,6 +637,24 @@ fn the_remote_web_app_is_served_with_a_landing_page_that_needs_no_javascript() {
 }
 
 #[test]
+fn inter_is_served_over_https_and_over_the_plain_http_hotspot() {
+    let mut rig = Rig::offline();
+    let https = rig.api();
+    let hotspot = rig.hotspot_api();
+    for file in ["Inter-Regular-latin.woff2", "Inter-Bold-latin.woff2", "OFL.txt"] {
+        let path = format!("/fonts/{file}");
+        for (listener, api) in [("https", &https), ("hotspot", &hotspot)] {
+            let (status, kind, body) = rig.drive(api.page(&path));
+            let wanted = if file.ends_with(".woff2") { "font/woff2" } else { "text/plain" };
+            assert_eq!((status, kind.as_str()), (200, wanted), "{file} on {listener}");
+            if file.ends_with(".woff2") {
+                assert!(body.starts_with("wOF2"), "{file} on {listener} is not a WOFF2 file");
+            }
+        }
+    }
+}
+
+#[test]
 fn an_unpaired_client_is_refused() {
     let mut rig = Rig::new();
     let api = rig.api();
@@ -938,25 +956,43 @@ fn the_remote_lists_every_declared_setting_and_changes_converge_both_ways() {
     let declared: Vec<(&str, &str)> =
         m4tv_settings::SETTINGS.iter().map(|d| (d.key, d.label)).collect();
     assert_eq!(listed, declared);
-    let volume = &first["settings"][0];
+    let setting = |key: &str| first["settings"].as_array().unwrap().iter().find(|s| s["key"] == key).unwrap().clone();
+    let volume = setting("volume");
     assert_eq!(volume["kind"], json!({"type": "range", "min": 0, "max": 100, "step": 5}));
     assert_eq!(volume["value"], 50);
-    assert_eq!(first["settings"][1]["kind"], json!({"type": "toggle"}));
-    assert_eq!(first["settings"][1]["value"], false);
+    assert_eq!(volume["category"], "Sound");
+    assert_eq!(setting("mute")["kind"], json!({"type": "toggle"}));
+    assert_eq!(setting("mute")["value"], false);
+    // The display settings from ADR 0005 reach the phone with their category.
+    let theme = setting("theme");
+    assert_eq!(theme["kind"], json!({"type": "choice", "options": ["Dark", "Light"]}));
+    assert_eq!((theme["value"].clone(), theme["category"].clone()), (json!(0), json!("Display")));
+    assert_eq!(setting("reduce_motion")["value"], false);
+    assert_eq!(setting("clock_24h")["value"], true);
 
     // Write from the phone: the Shell takes it and the push follows.
     let (status, _) =
         rig.drive(api.put("/api/settings/volume", Some(&token), json!({"value": 70})));
     assert_eq!(status, 204);
-    rig.drive(state_where(&mut ws, |s| s["settings"][0]["value"] == 70 && s["volume"] == 70));
+    rig.drive(state_where(&mut ws, |s| value_of(s, "volume") == 70 && s["volume"] == 70));
     let (status, _) =
         rig.drive(api.put("/api/settings/mute", Some(&token), json!({"value": true})));
     assert_eq!(status, 204);
-    rig.drive(state_where(&mut ws, |s| s["settings"][1]["value"] == true && s["muted"] == true));
+    rig.drive(state_where(&mut ws, |s| value_of(s, "mute") == true && s["muted"] == true));
+    let (status, _) = rig.drive(api.put("/api/settings/theme", Some(&token), json!({"value": 1})));
+    assert_eq!(status, 204);
+    rig.drive(state_where(&mut ws, |s| value_of(s, "theme") == 1));
+    assert_eq!(rig.shell.setting_text("theme"), "Light");
 
     // Write from the Shell: the phone sees it without asking.
     rig.shell.press(Key::VolumeUp);
-    rig.drive(state_where(&mut ws, |s| s["settings"][0]["value"] == 75));
+    rig.drive(state_where(&mut ws, |s| value_of(s, "volume") == 75));
+}
+
+/// The value of the setting `key` in a pushed live state.
+fn value_of(state: &Value, key: &str) -> Value {
+    let settings = state["settings"].as_array().unwrap();
+    settings.iter().find(|s| s["key"] == key).unwrap()["value"].clone()
 }
 
 #[test]
@@ -974,6 +1010,7 @@ fn the_remote_refuses_settings_the_shell_would_not_take() {
     assert_eq!(rig.drive(put("volume", json!({"value": 52}))).0, 400, "off the step");
     assert_eq!(rig.drive(put("volume", json!({"value": true}))).0, 400);
     assert_eq!(rig.drive(put("mute", json!({"value": 1}))).0, 400);
+    assert_eq!(rig.drive(put("theme", json!({"value": 2}))).0, 400, "no third theme");
     assert_eq!(rig.drive(api.put("/api/settings/volume", None, json!({"value": 60}))).0, 401);
     assert_eq!(rig.drive(api.get("/api/state", Some(&token))).1["volume"], 50);
 }
@@ -1092,8 +1129,9 @@ fn a_phone_on_the_hotspot_picks_a_wifi_and_the_tv_hands_over_to_its_new_address(
     assert_eq!(fragment_field(&payload, "fp"), rig.fingerprint);
     assert_eq!(setup_state(&mut rig, &token), json!({"phase": "joined", "address": "10.0.0.7"}));
 
-    // Then the hotspot drops, listener included.
-    assert!(rig.os.hotspot().is_some());
+    // The join took the radio from the hotspot; its listener stays up a few seconds for the phone
+    // and then drops.
+    assert_eq!(rig.os.hotspot(), None);
     rig.shell.tick(Duration::from_secs(5));
     assert_eq!(rig.os.hotspot(), None);
     let http = rig.hotspot_api();
@@ -1188,6 +1226,7 @@ fn no_address_within_thirty_seconds_counts_as_a_failed_join() {
 
     rig.shell.tick(Duration::from_secs(29));
     assert_eq!(setup_state(&mut rig, &token)["phase"], "joining");
+    assert_eq!(rig.os.hotspot(), None, "joining takes the radio from the hotspot");
     rig.shell.tick(Duration::from_secs(2));
     let setup = setup_state(&mut rig, &token);
     assert_eq!(setup["phase"], "hotspot");
@@ -1200,6 +1239,15 @@ fn settings_starts_the_hotspot_on_demand_except_on_ethernet() {
     let mut rig = Rig::new();
     let row = rig.shell.settings_rows().iter().position(|r| r.label() == "Setup hotspot").unwrap();
     open_settings_row(&mut rig, row);
+    // On Wi-Fi the first Enter only warns that the TV will be disconnected.
+    rig.shell.press(Key::Enter);
+    assert_eq!(rig.os.hotspot(), None);
+    assert!(rig.shell.notice().unwrap().contains("leaves its Wi-Fi"));
+    // Another key withdraws the warning, so the next Enter warns again.
+    rig.shell.press(Key::Down);
+    rig.shell.press(Key::Up);
+    rig.shell.press(Key::Enter);
+    assert_eq!(rig.os.hotspot(), None);
     rig.shell.press(Key::Enter);
     assert!(rig.os.hotspot().is_some());
     hotspot_overlay(&rig);
@@ -1326,6 +1374,7 @@ fn a_phone_with_the_remote_open_clears_the_hotspot_panel_and_back_leaves_it_conn
     let mut rig = Rig::new();
     let row = rig.shell.settings_rows().iter().position(|r| r.label() == "Setup hotspot").unwrap();
     open_settings_row(&mut rig, row);
+    rig.shell.press(Key::Enter); // the warning
     rig.shell.press(Key::Enter);
     hotspot_overlay(&rig);
 
@@ -1367,7 +1416,7 @@ fn a_phone_that_paired_just_before_the_join_does_not_end_the_handover() {
         "{:?}",
         rig.shell.overlay()
     );
-    assert!(rig.os.hotspot().is_some(), "the phone is still being told");
+    assert_eq!(rig.os.hotspot(), None, "the join took the radio, the phone is told by the listener");
 
     // Ending the handover early (a phone paired at the new address) takes the hotspot with it.
     let api = rig.api();

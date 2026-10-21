@@ -1,26 +1,32 @@
 //! The Shell. On Windows this is the Dev host: an ordinary window, a keyboard for the TV remote.
 
-#[cfg(feature = "cef")]
-mod cef_engine;
-
 use std::{
-    path::Path,
+    borrow::Cow,
+    path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
 };
 
 use gpui::{
-    App, Bounds, Context, FocusHandle, KeyDownEvent, RenderImage, Window, WindowBounds,
-    WindowOptions, div, img, prelude::*, px, rgb, size,
+    App, Bounds, Context, FocusHandle, FontWeight, KeyDownEvent, RenderImage, Window,
+    WindowBounds, WindowOptions, div, img, prelude::*, px, rgb, size,
 };
 use gpui_platform::application;
 use m4tv_os::FakeOs;
 use m4tv_shell::{
     apps::built_in_apps,
+    electron_engine::{ElectronEngine, EngineConfig},
     engine::{Engine, Frame},
     remote::Remote,
     shell::{Key, Overlay, Row, Screen, Shell},
+    tokens::{self, DARK as PALETTE},
 };
+
+/// Inter, bundled from `design/fonts` with its licence (SIL OFL 1.1).
+const FONTS: [&[u8]; 2] = [
+    include_bytes!("../../../design/fonts/Inter-Regular.ttf"),
+    include_bytes!("../../../design/fonts/Inter-Bold.ttf"),
+];
 
 struct ShellView {
     shell: Shell,
@@ -36,15 +42,42 @@ fn render_image(frame: Frame) -> RenderImage {
     RenderImage::new(vec![image::Frame::new(buffer)])
 }
 
-/// Starts the Engine. With CEF, a helper process exits in here and never reaches the Shell.
-#[cfg(feature = "cef")]
-fn start_engine() -> Box<dyn Engine> {
-    Box::new(cef_engine::start(".m4tv-dev/cef".into()))
+/// The Electron that `node engine/fetch-electron.mjs` unpacks for this machine (ADR 0006), unless
+/// `M4TV_ELECTRON` says otherwise.
+fn electron_program(root: &Path) -> PathBuf {
+    if let Some(program) = std::env::var_os("M4TV_ELECTRON") {
+        return program.into();
+    }
+    let pin: serde_json::Value =
+        serde_json::from_str(include_str!("../../../engine/electron.pin.json"))
+            .expect("engine/electron.pin.json is JSON");
+    let target = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH)
+        .replace("x86_64", "x64")
+        .replace("aarch64", "arm64")
+        .replace("windows", "win32");
+    let name = if cfg!(windows) { "electron.exe" } else { "electron" };
+    root.join(".m4tv-dev/electron").join(format!("{}-{target}", pin["tag"].as_str().unwrap())).join(name)
 }
 
-#[cfg(not(feature = "cef"))]
+/// Starts the Engine: the pinned Electron running `engine/host`. Without it the Shell still runs,
+/// with Apps that show nothing.
 fn start_engine() -> Box<dyn Engine> {
-    Box::new(m4tv_shell::engine::NoEngine)
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let program = electron_program(&root);
+    if !program.exists() {
+        eprintln!("Engine not started: {} is missing; run `node engine/fetch-electron.mjs`", program.display());
+        return Box::new(m4tv_shell::engine::NoEngine);
+    }
+    let host = std::env::var_os("M4TV_ENGINE_HOST")
+        .map_or_else(|| root.join("engine/host"), PathBuf::from);
+    let config = EngineConfig::new(program, vec![host.into()], ".m4tv-dev/electron-data".into());
+    match ElectronEngine::start(config) {
+        Ok(engine) => Box::new(engine),
+        Err(e) => {
+            eprintln!("Engine not started: {e}");
+            Box::new(m4tv_shell::engine::NoEngine)
+        }
+    }
 }
 
 impl Render for ShellView {
@@ -62,9 +95,10 @@ impl Render for ShellView {
             .flex_col()
             .items_center()
             .justify_center()
-            .gap_8()
-            .bg(rgb(0x101418))
-            .text_color(rgb(0xffffff));
+            .gap(px(tokens::SPACE_8))
+            .font_family("Inter")
+            .bg(rgb(PALETTE.background))
+            .text_color(rgb(PALETTE.text));
 
         let screen = self.shell.screen().clone();
         if !matches!(screen, Screen::App(_))
@@ -83,15 +117,15 @@ impl Render for ShellView {
                         .flex()
                         .items_center()
                         .justify_center()
-                        .rounded_lg()
+                        .rounded(px(tokens::RADIUS_MEDIUM))
                         .border_4()
-                        .border_color(if focused { rgb(0xffffff) } else { rgb(0x2a323c) })
-                        .bg(if focused { rgb(0x2a323c) } else { rgb(0x1a2028) })
-                        .text_2xl()
+                        .border_color(if focused { rgb(PALETTE.ink) } else { rgb(PALETTE.border) })
+                        .bg(if focused { rgb(PALETTE.raised) } else { rgb(PALETTE.surface) })
+                        .text_size(px(tokens::TEXT_2XL))
                         .child(label)
                 });
-                root.child(div().text_3xl().child("m4TV"))
-                    .child(div().flex().gap_6().children(tiles))
+                root.child(heading("m4TV"))
+                    .child(div().flex().gap(px(tokens::SPACE_6)).children(tiles))
             }
             Screen::Settings => {
                 let rows = self.shell.settings_rows().into_iter().enumerate().map(|(i, row)| {
@@ -102,23 +136,23 @@ impl Render for ShellView {
                     };
                     div()
                         .w(px(480.))
-                        .px_6()
-                        .py_3()
+                        .px(px(tokens::SPACE_6))
+                        .py(px(tokens::SPACE_3))
                         .flex()
                         .justify_between()
-                        .rounded_lg()
+                        .rounded(px(tokens::RADIUS_MEDIUM))
                         .border_2()
-                        .border_color(if focused { rgb(0xffffff) } else { rgb(0x2a323c) })
-                        .bg(if focused { rgb(0x2a323c) } else { rgb(0x1a2028) })
-                        .text_xl()
+                        .border_color(if focused { rgb(PALETTE.ink) } else { rgb(PALETTE.border) })
+                        .bg(if focused { rgb(PALETTE.raised) } else { rgb(PALETTE.surface) })
+                        .text_size(px(tokens::TEXT_XL))
                         .child(row.label())
                         .child(value)
                 });
-                root.child(div().text_3xl().child("Settings"))
-                    .child(div().flex().flex_col().gap_3().children(rows))
+                root.child(heading("Settings"))
+                    .child(div().flex().flex_col().gap(px(tokens::SPACE_3)).children(rows))
                     .child(
                         div()
-                            .text_color(rgb(0x8a96a3))
+                            .text_color(rgb(PALETTE.muted))
                             .child(format!("Version {}", self.shell.version())),
                     )
                     .child(div().h(px(28.)).child(self.shell.notice().unwrap_or("").to_string()))
@@ -133,7 +167,7 @@ impl Render for ShellView {
                 }
                 match &self.page {
                     Some(page) => root.child(img(page.clone()).size_full()),
-                    None => root.child(div().text_3xl().child(
+                    None => root.child(heading(
                         self.shell.app(&id).expect("open App is in the catalogue").name.clone(),
                     )),
                 }
@@ -144,60 +178,67 @@ impl Render for ShellView {
             match overlay {
                 Overlay::Volume { level, muted } => div()
                     .absolute()
-                    .top(px(32.))
-                    .right(px(32.))
-                    .px_6()
-                    .py_3()
-                    .rounded_lg()
-                    .bg(rgb(0x1a2028))
+                    .top(px(tokens::SPACE_8))
+                    .right(px(tokens::SPACE_8))
+                    .px(px(tokens::SPACE_6))
+                    .py(px(tokens::SPACE_3))
+                    .rounded(px(tokens::RADIUS_MEDIUM))
+                    .bg(rgb(PALETTE.surface))
                     .border_2()
-                    .border_color(rgb(0x2a323c))
-                    .text_2xl()
+                    .border_color(rgb(PALETTE.border))
+                    .text_size(px(tokens::TEXT_2XL))
                     .child(if *muted { "Muted".to_string() } else { format!("Volume {level}") }),
                 Overlay::Pairing { pin, payload, cert_replaced } => panel()
-                    .child(div().text_xl().child("Pair your phone"))
+                    .child(div().text_size(px(tokens::TEXT_XL)).child("Pair your phone"))
                     .child(qr_code(payload))
-                    .child(div().text_2xl().child(format!("PIN {pin}")))
+                    .child(div().text_size(px(tokens::TEXT_2XL)).child(format!("PIN {pin}")))
                     .children(cert_replaced.then(|| {
                         div()
-                            .text_color(rgb(0xf0b429))
+                            .text_color(rgb(PALETTE.state))
                             .child("This TV's certificate changed: pair your phones again")
                     })),
                 Overlay::Hotspot { ssid, password, payload, url, status } => panel()
-                    .child(div().text_xl().child("Set up this TV: join its Wi-Fi"))
+                    .child(
+                        div().text_size(px(tokens::TEXT_XL)).child("Set up this TV: join its Wi-Fi"),
+                    )
                     .child(qr_code(payload))
-                    .child(div().text_2xl().child(ssid.clone()))
-                    .child(div().text_2xl().child(format!("Password {password}")))
+                    .child(div().text_size(px(tokens::TEXT_2XL)).child(ssid.clone()))
+                    .child(div().text_size(px(tokens::TEXT_2XL)).child(format!("Password {password}")))
                     .children((!url.is_empty()).then(|| div().child(format!("Then open {url}"))))
                     .children(
                         (!status.is_empty())
-                            .then(|| div().text_color(rgb(0xf0b429)).child(status.clone())),
+                            .then(|| div().text_color(rgb(PALETTE.state)).child(status.clone())),
                     ),
                 Overlay::Joined { address, payload } => panel()
-                    .child(div().text_xl().child("Connected: pair your phone"))
+                    .child(div().text_size(px(tokens::TEXT_XL)).child("Connected: pair your phone"))
                     .child(qr_code(payload))
-                    .child(div().text_2xl().child(format!("https://{address}")))
+                    .child(div().text_size(px(tokens::TEXT_2XL)).child(format!("https://{address}")))
                     .child(div().child("or https://m4tv.local")),
             }
         }))
     }
 }
 
+/// A screen's title.
+fn heading(text: impl Into<gpui::SharedString>) -> gpui::Div {
+    div().text_size(px(tokens::TEXT_3XL)).font_weight(FontWeight::BOLD).child(text.into())
+}
+
 /// The box an Overlay with a QR code sits in.
 fn panel() -> gpui::Div {
     div()
         .absolute()
-        .right(px(32.))
-        .bottom(px(32.))
-        .p_6()
+        .right(px(tokens::SPACE_8))
+        .bottom(px(tokens::SPACE_8))
+        .p(px(tokens::SPACE_6))
         .flex()
         .flex_col()
         .items_center()
-        .gap_3()
-        .rounded_lg()
-        .bg(rgb(0x1a2028))
+        .gap(px(tokens::SPACE_3))
+        .rounded(px(tokens::RADIUS_MEDIUM))
+        .bg(rgb(PALETTE.surface))
         .border_2()
-        .border_color(rgb(0x2a323c))
+        .border_color(rgb(PALETTE.border))
 }
 
 fn qr_code(payload: &str) -> gpui::Div {
@@ -207,10 +248,10 @@ fn qr_code(payload: &str) -> gpui::Div {
     let rows = modules.chunks(width).map(|row| {
         div().flex().children(row.iter().map(|module| {
             let dark = *module == qrcode::Color::Dark;
-            div().size(px(6.)).bg(if dark { rgb(0x000000) } else { rgb(0xffffff) })
+            div().size(px(6.)).bg(if dark { rgb(tokens::QR_DARK) } else { rgb(tokens::QR_LIGHT) })
         }))
     });
-    div().p_3().bg(rgb(0xffffff)).flex().flex_col().children(rows.collect::<Vec<_>>())
+    div().p(px(tokens::SPACE_3)).bg(rgb(tokens::QR_LIGHT)).flex().flex_col().children(rows.collect::<Vec<_>>())
 }
 
 /// The Dev host's Shell, with its Remote server. Without a Remote it still runs.
@@ -227,6 +268,9 @@ fn dev_host_shell(engine: Box<dyn Engine>) -> Shell {
 fn main() {
     let engine = start_engine();
     application().run(|cx: &mut App| {
+        cx.text_system()
+            .add_fonts(FONTS.iter().map(|font| Cow::Borrowed(*font)).collect())
+            .expect("the bundled Inter loads");
         let bounds = Bounds::centered(None, size(px(1280.), px(720.)), cx);
         let window = cx
             .open_window(
@@ -250,8 +294,6 @@ fn main() {
                 cx.background_executor().timer(Duration::from_millis(16)).await;
                 let elapsed = last.elapsed();
                 last = Instant::now();
-                #[cfg(feature = "cef")]
-                cef_engine::pump();
                 let _ = window.update(cx, |view, _window, cx| {
                     // Redraw while an App plays, and when a tick changed anything else.
                     let changed = view.shell.tick(elapsed);
@@ -264,6 +306,4 @@ fn main() {
         .detach();
         cx.activate(true);
     });
-    #[cfg(feature = "cef")]
-    cef_engine::shutdown_cef();
 }

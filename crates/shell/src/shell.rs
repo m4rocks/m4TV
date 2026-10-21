@@ -33,18 +33,18 @@ pub enum Key {
 }
 
 impl Key {
-    /// The Windows virtual-key code a page sees for this key. Back, Home and the volume keys
+    /// The name Electron's `sendInputEvent` takes for this key. Back, Home and the volume keys
     /// belong to the Shell; media keys go to the page.
-    pub fn windows_key_code(self) -> Option<i32> {
+    pub fn electron_key_code(self) -> Option<&'static str> {
         Some(match self {
-            Key::Left => 0x25,
-            Key::Up => 0x26,
-            Key::Right => 0x27,
-            Key::Down => 0x28,
-            Key::Enter => 0x0D,
-            Key::PlayPause => 0xB3,
-            Key::NextTrack => 0xB0,
-            Key::PreviousTrack => 0xB1,
+            Key::Left => "Left",
+            Key::Up => "Up",
+            Key::Right => "Right",
+            Key::Down => "Down",
+            Key::Enter => "Return",
+            Key::PlayPause => "MediaPlayPause",
+            Key::NextTrack => "MediaNextTrack",
+            Key::PreviousTrack => "MediaPreviousTrack",
             Key::Back | Key::Home | Key::VolumeUp | Key::VolumeDown | Key::Mute => return None,
         })
     }
@@ -184,6 +184,9 @@ pub struct Shell {
     /// How many phones were paired when the Shell last looked.
     phones_seen: usize,
     setup: Setup,
+    /// The Settings row for the on-demand hotspot warned that it disconnects the TV, and the very
+    /// next key decides whether it starts.
+    hotspot_warned: bool,
 }
 
 impl Shell {
@@ -203,6 +206,7 @@ impl Shell {
             pairing_requested: false,
             phones_seen: 0,
             setup: Setup::Off,
+            hotspot_warned: false,
         }
     }
 
@@ -248,7 +252,7 @@ impl Shell {
 
     /// The displayed value of a declared setting.
     pub fn setting_text(&self, key: &str) -> String {
-        self.settings.get(key).to_string()
+        self.settings.text(key)
     }
 
     /// What the last device action or failed save said, until the next key.
@@ -399,9 +403,13 @@ impl Shell {
                 .map(|def| SettingState {
                     key: def.key,
                     label: def.label,
+                    category: def.category.label(),
                     kind: match def.kind {
                         Kind::Range { min, max, step } => SettingKind::Range { min, max, step },
                         Kind::Toggle => SettingKind::Toggle,
+                        Kind::Choice { options } => {
+                            SettingKind::Choice { options: options.to_vec() }
+                        }
                     },
                     value: self.settings.get(def.key),
                 })
@@ -536,6 +544,7 @@ impl Shell {
 
     fn press_settings(&mut self, key: Key) {
         self.notice = None;
+        let warned = std::mem::take(&mut self.hotspot_warned);
         let rows = self.settings_rows();
         match key {
             Key::Back | Key::Home => self.screen = Screen::Home,
@@ -548,7 +557,7 @@ impl Shell {
                     self.adjust(def.key, if key == Key::Left { -1 } else { 1 });
                 }
                 Row::Pair if key == Key::Enter => self.pairing_requested = true,
-                Row::Hotspot if key == Key::Enter => self.ask_for_hotspot(),
+                Row::Hotspot if key == Key::Enter => self.ask_for_hotspot(warned),
                 Row::Phone(phone) if key == Key::Enter => self.revoke(phone.id),
                 Row::Reboot if key == Key::Enter => self.notice = Some(self.os.reboot()),
                 Row::PowerOff if key == Key::Enter => self.notice = Some(self.os.power_off()),

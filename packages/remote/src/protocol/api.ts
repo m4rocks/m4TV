@@ -50,9 +50,13 @@ export type OrderRequest = { apps: Array<string>, };
 
 export type TextRequest = { text: string, };
 
-export type SettingState = { key: string, label: string, kind: SettingKind, value: boolean | number, };
+export type SettingState = { key: string, label: string, 
+/**
+ * The group the setting is listed under.
+ */
+category: string, kind: SettingKind, value: boolean | number, };
 
-export type SettingKind = { "type": "range", min: number, max: number, step: number, } | { "type": "toggle" };
+export type SettingKind = { "type": "range", min: number, max: number, step: number, } | { "type": "toggle" } | { "type": "choice", options: Array<string>, };
 
 export type SettingRequest = { value: boolean | number, };
 

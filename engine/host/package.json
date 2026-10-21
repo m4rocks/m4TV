@@ -1,0 +1,6 @@
+{
+  "name": "m4tv-engine-host",
+  "private": true,
+  "version": "0.0.0",
+  "main": "main.js"
+}

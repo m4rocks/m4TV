@@ -83,6 +83,8 @@ pub struct WifiView {
 pub struct SettingState {
     pub key: &'static str,
     pub label: &'static str,
+    /// The group the setting is listed under.
+    pub category: &'static str,
     pub kind: SettingKind,
     #[ts(type = "boolean | number")]
     pub value: Value,
@@ -100,6 +102,10 @@ pub enum SettingKind {
         step: i64,
     },
     Toggle,
+    /// The value is the index of one of `options`.
+    Choice {
+        options: Vec<&'static str>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]

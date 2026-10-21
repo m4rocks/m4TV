@@ -1,0 +1,18 @@
+{
+  "tag": "v44.5.1+wvcus",
+  "repository": "castlabs/electron-releases",
+  "assets": {
+    "win32-x64": {
+      "name": "electron-v44.5.1+wvcus-win32-x64.zip",
+      "sha256": "c7d51e4bf80de9ef18b3306b0d140059bb203510d3dfc88f3404049a12c90f89"
+    },
+    "linux-x64": {
+      "name": "electron-v44.5.1+wvcus-linux-x64.zip",
+      "sha256": "afa7d4ea49abf1e91c5be0f88cfe1abdb977ff3454d57658e90b004aacbde9cc"
+    },
+    "linux-arm64": {
+      "name": "electron-v44.5.1+wvcus-linux-arm64.zip",
+      "sha256": "4c8254f1719e7596e3e5661a2c7922591bd3c5eb2dacd74fb96b022ea291ea95"
+    }
+  }
+}

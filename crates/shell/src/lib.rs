@@ -1,9 +1,15 @@
 //! The Shell's UI-independent core: App definitions and the TV-remote navigation state.
 
 pub mod apps;
+pub mod electron_engine;
 pub mod engine;
 pub mod remote;
 pub mod shell;
+
+/// The design tokens of ADR 0005 (`design/tokens.json`), turned into constants by build.rs.
+pub mod tokens {
+    include!(concat!(env!("OUT_DIR"), "/tokens.rs"));
+}
 
 #[cfg(test)]
 mod tests {
@@ -299,20 +305,23 @@ start_url = \"https://x\"
     #[test]
     fn the_settings_screen_lists_every_declared_setting_then_the_device_actions() {
         let mut shell = shell();
-        at_row(&mut shell, "Volume");
+        at_row(&mut shell, "Theme");
         let labels: Vec<_> = shell.settings_rows().iter().map(Row::label).collect();
-        assert_eq!(labels, ["Volume", "Mute", "Reboot", "Power off"]);
+        assert_eq!(
+            labels,
+            ["Theme", "Reduce motion", "24-hour clock", "Volume", "Mute", "Reboot", "Power off"]
+        );
         assert_eq!(shell.settings_focused(), 0);
     }
 
     #[test]
     fn settings_focus_moves_up_and_down_and_stops_at_the_ends() {
         let mut shell = shell();
-        at_row(&mut shell, "Volume");
+        at_row(&mut shell, "Theme");
         shell.press(Key::Up);
         assert_eq!(shell.settings_focused(), 0);
-        press(&mut shell, &[Key::Down; 9]);
-        assert_eq!(shell.settings_focused(), 3);
+        press(&mut shell, &[Key::Down; 12]);
+        assert_eq!(shell.settings_focused(), 6);
     }
 
     #[test]
@@ -323,6 +332,20 @@ start_url = \"https://x\"
         assert_eq!(shell.setting_text("volume"), "55");
         press(&mut shell, &[Key::Down, Key::Enter]);
         assert_eq!(shell.setting_text("mute"), "On");
+    }
+
+    #[test]
+    fn the_display_settings_change_from_the_keys_and_a_choice_wraps() {
+        let mut shell = shell();
+        at_row(&mut shell, "Theme");
+        assert_eq!(shell.setting_text("theme"), "Dark");
+        press(&mut shell, &[Key::Right]);
+        assert_eq!(shell.setting_text("theme"), "Light");
+        press(&mut shell, &[Key::Right]);
+        assert_eq!(shell.setting_text("theme"), "Dark");
+        press(&mut shell, &[Key::Down, Key::Enter, Key::Down, Key::Enter]);
+        assert_eq!(shell.setting_text("reduce_motion"), "On");
+        assert_eq!(shell.setting_text("clock_24h"), "Off");
     }
 
     #[test]
@@ -483,17 +506,20 @@ start_url = \"https://x\"
     }
 
     #[test]
-    fn remote_keys_map_to_windows_virtual_key_codes() {
+    fn remote_keys_map_to_the_names_electron_takes_for_input_events() {
         let codes: Vec<_> = [Key::Left, Key::Up, Key::Right, Key::Down, Key::Enter]
-            .map(Key::windows_key_code)
+            .map(Key::electron_key_code)
             .into();
-        assert_eq!(codes, [Some(0x25), Some(0x26), Some(0x27), Some(0x28), Some(0x0D)]);
         assert_eq!(
-            Key::Back.windows_key_code(),
+            codes,
+            [Some("Left"), Some("Up"), Some("Right"), Some("Down"), Some("Return")]
+        );
+        assert_eq!(
+            Key::Back.electron_key_code(),
             None,
             "Back and Home are the Shell's, not the page's"
         );
-        assert_eq!(Key::Home.windows_key_code(), None);
+        assert_eq!(Key::Home.electron_key_code(), None);
     }
 
     fn frame() -> super::engine::Frame {
@@ -590,7 +616,12 @@ start_url = \"https://x\"
         }
         assert_eq!(Key::from_code("KeyA"), None);
         // Media keys reach the page; Back, Home and volume stay with the Shell.
-        assert_eq!(Key::PlayPause.windows_key_code(), Some(0xB3));
-        assert_eq!(Key::Home.windows_key_code(), None);
+        assert_eq!(Key::PlayPause.electron_key_code(), Some("MediaPlayPause"));
+        assert_eq!(Key::Home.electron_key_code(), None);
+        // What the Remote's buttons send ends up as an Electron input event.
+        let sent: Vec<_> = ["ArrowLeft", "Enter", "MediaTrackNext", "Escape"]
+            .map(|code| Key::from_code(code).and_then(Key::electron_key_code))
+            .into();
+        assert_eq!(sent, [Some("Left"), Some("Return"), Some("MediaNextTrack"), None]);
     }
 }

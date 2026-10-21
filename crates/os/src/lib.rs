@@ -73,7 +73,9 @@ pub trait Os {
     fn stop_hotspot(&self);
     /// The visible Wi-Fi networks, hidden ones not included.
     fn scan_wifi(&self) -> Vec<WifiNetwork>;
-    /// Starts joining. Never blocks: the outcome shows up in `join_status`.
+    /// Starts joining. Never blocks: the outcome shows up in `join_status`. The radio serves one
+    /// of the hotspot and the join at a time (ADR 0007), so this stops the hotspot. A join that
+    /// fails or runs out of time leaves it stopped: the caller starts it again.
     fn join_wifi(&self, request: &JoinRequest);
     fn join_status(&self) -> JoinStatus;
     /// Gives up on a join that has not finished, so it cannot finish later.
@@ -244,6 +246,7 @@ impl Os for FakeOs {
 
     fn join_wifi(&self, request: &JoinRequest) {
         let mut net = self.net.lock().unwrap();
+        net.hotspot = None;
         if net.stall {
             net.pending = Some(request.clone());
             net.join = JoinStatus::Joining;
@@ -325,6 +328,18 @@ mod tests {
         os.join_wifi(&request("Home", None, Security::Open, false));
         os.stall_dhcp(false);
         assert_eq!(os.join_status(), JoinStatus::Joined { address: "10.0.0.7".into() });
+    }
+
+    #[test]
+    fn a_join_stops_the_hotspot_and_a_failed_one_leaves_it_stopped() {
+        let os = FakeOs::new("s.toml".into());
+        os.add_wifi("Home", Security::Wpa2, Some("hunter22"), false, "10.0.0.7");
+        os.start_hotspot(&Hotspot { ssid: "m4TV-Setup".into(), password: "pw".into() });
+        assert!(os.hotspot().is_some());
+
+        os.join_wifi(&request("Home", Some("nope"), Security::Wpa2, false));
+        assert_eq!(os.join_status(), JoinStatus::Failed("wrong password".into()));
+        assert_eq!(os.hotspot(), None);
     }
 
     #[test]

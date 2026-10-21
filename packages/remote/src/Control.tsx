@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { CommandError, createApi } from "./api/api";
 import { connectLive, type Link } from "./live/live";
 import type { LiveState } from "./protocol/api";
-import { moved, setupMessage, tabAfter, tabsFor, type Tab } from "./screens";
+import { byCategory, moved, setupMessage, tabAfter, tabsFor, type Tab } from "./screens";
 import { ErrorBanner, StatusBanner, buttonPrimary, input, listButton } from "./ui";
 import { joinRequest, type JoinForm, type Security } from "./wifi/wifi";
 
@@ -190,41 +190,52 @@ function Settings({
 }) {
   if (!live) return <p>Waiting for the TV…</p>;
   return (
-    <ul className="space-y-2">
-      {live.settings.map((setting) => (
-        <li key={setting.key} className="flex items-center gap-2">
-          <span className="flex-1 text-lg">{setting.label}</span>
-          {setting.kind.type === "toggle" ? (
-            <button
-              className={pad}
-              role="switch"
-              aria-checked={setting.value as boolean}
-              onClick={() => onStep(setting.key, 1)}
-            >
-              {setting.value ? "On" : "Off"}
-            </button>
-          ) : (
-            <>
-              <button
-                className={pad}
-                aria-label={`${setting.label} down`}
-                onClick={() => onStep(setting.key, -1)}
-              >
-                −
-              </button>
-              <span className="w-12 text-center text-lg">{String(setting.value)}</span>
-              <button
-                className={pad}
-                aria-label={`${setting.label} up`}
-                onClick={() => onStep(setting.key, 1)}
-              >
-                +
-              </button>
-            </>
-          )}
-        </li>
+    <div className="space-y-6">
+      {byCategory(live.settings).map(([category, settings]) => (
+        <section key={category} aria-label={category}>
+          <h2 className="mb-2 text-sm font-bold uppercase text-gray-500">{category}</h2>
+          <ul className="space-y-2">
+            {settings.map((setting) => (
+              <li key={setting.key} className="flex items-center gap-2">
+                <span className="flex-1 text-lg">{setting.label}</span>
+                {setting.kind.type === "toggle" ? (
+                  <button
+                    className={pad}
+                    role="switch"
+                    aria-checked={setting.value as boolean}
+                    onClick={() => onStep(setting.key, 1)}
+                  >
+                    {setting.value ? "On" : "Off"}
+                  </button>
+                ) : (
+                  <>
+                    <button
+                      className={pad}
+                      aria-label={`${setting.label} down`}
+                      onClick={() => onStep(setting.key, -1)}
+                    >
+                      −
+                    </button>
+                    <span className="w-16 text-center text-lg">
+                      {setting.kind.type === "choice"
+                        ? setting.kind.options[setting.value as number]
+                        : String(setting.value)}
+                    </span>
+                    <button
+                      className={pad}
+                      aria-label={`${setting.label} up`}
+                      onClick={() => onStep(setting.key, 1)}
+                    >
+                      +
+                    </button>
+                  </>
+                )}
+              </li>
+            ))}
+          </ul>
+        </section>
       ))}
-    </ul>
+    </div>
   );
 }
 
