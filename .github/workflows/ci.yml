@@ -5,14 +5,14 @@ on:
     branches: [main]
   pull_request:
 
-# The Shell must compile for the Dev host (Windows) and the device (Linux): ADR 0003.
-# Running the Dev host stays manual.
+# The Shell must compile for the Dev host (Windows) and the device (Linux, x86 and the Pi's
+# aarch64): ADR 0003, ADR 0006. Running the Dev host stays manual.
 jobs:
   build:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest]
+        os: [windows-latest, ubuntu-latest, ubuntu-24.04-arm]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -31,3 +31,17 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: extractions/setup-just@v2
       - run: just ci
+      # What the image installs: the aarch64 release binary, named by version and commit.
+      - name: Build the release Shell
+        if: runner.arch == 'ARM64'
+        run: |
+          cargo build --release --locked -p m4tv-shell
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "m4tv-shell") | .version')
+          mkdir dist
+          cp target/release/m4tv-shell "dist/m4tv-shell-aarch64-v${version}-${GITHUB_SHA::7}"
+      - uses: actions/upload-artifact@v4
+        if: runner.arch == 'ARM64'
+        with:
+          name: m4tv-shell-aarch64-${{ github.sha }}
+          path: dist/*
+          if-no-files-found: error
