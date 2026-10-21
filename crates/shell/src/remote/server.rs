@@ -31,7 +31,7 @@ use serde_json::json;
 use tokio::sync::{mpsc::UnboundedSender, watch};
 use ts_rs::TS;
 
-use super::{Command, LiveState, PairError, Pairings, SetupView};
+use super::{CdmView, Command, LiveState, PairError, Pairings, SetupView};
 use crate::shell::Key;
 
 /// How often an open WebSocket checks that its phone is still paired and still there.
@@ -71,6 +71,7 @@ pub(super) fn router(shared: Shared, hotspot: bool) -> Router {
         .route("/settings/{key}", put(setting))
         .route("/settings/{key}/step", post(step))
         .route("/wifi/join", post(join))
+        .route("/engine/cdm/retry", post(retry_cdm))
         .layer(middleware::from_fn_with_state(shared.clone(), authenticate));
     let router = Router::new().route("/api/ws", get(ws)).nest("/api", api);
     let router = if hotspot {
@@ -237,6 +238,13 @@ async fn launch(State(shared): State<Shared>, Json(request): Json<LaunchRequest>
         return refuse(StatusCode::NOT_FOUND, "no such App");
     }
     send(&shared, Command::Launch(request.app))
+}
+
+async fn retry_cdm(State(shared): State<Shared>) -> Response {
+    if !matches!(shared.state.borrow().cdm, CdmView::Failed { .. }) {
+        return refuse(StatusCode::CONFLICT, "video playback has not failed");
+    }
+    send(&shared, Command::RetryCdm)
 }
 
 #[derive(Deserialize, TS)]
@@ -430,7 +438,7 @@ mod tests {
     use ts_rs::{Config, TS};
 
     use super::*;
-    use crate::remote::{AppSummary, SettingKind, SettingState, WifiView};
+    use crate::remote::{AppSummary, CdmView, SettingKind, SettingState, WifiView};
 
     /// The TypeScript types the Remote web app uses, generated from the Rust ones. Stale types
     /// fail this test; `UPDATE_TS=1 cargo test -p m4tv-shell typescript` rewrites them.
@@ -443,6 +451,7 @@ mod tests {
         );
         for decl in [
             AppSummary::decl(&cfg),
+            CdmView::decl(&cfg),
             LiveState::decl(&cfg),
             PairRequest::decl(&cfg),
             ProveRequest::decl(&cfg),

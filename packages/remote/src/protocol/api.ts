@@ -3,6 +3,8 @@
 
 export type AppSummary = { id: string, name: string, };
 
+export type CdmView = { "status": "preparing" } | { "status": "ready" } | { "status": "failed", reason: string, };
+
 export type LiveState = { 
 /**
  * "home", "app" or "settings".
@@ -28,6 +30,10 @@ editable: boolean,
  * Every declared setting, in the declaration's order: the Remote builds its screens from this.
  */
 settings: Array<SettingState>, 
+/**
+ * Whether the Engine's video playback is ready, and if not, why.
+ */
+cdm: CdmView, 
 /**
  * Whether the TV is setting itself up on the Setup hotspot, and how that is going.
  */

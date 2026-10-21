@@ -41,6 +41,7 @@ export function createApi(token: string, fetcher: typeof fetch = fetch) {
     key: (code: string) => call("POST", "/key", { code }),
     launch: (app: string) => call("POST", "/launch", { app }),
     order: (apps: string[]) => call("PUT", "/apps/order", { apps }),
+    retryCdm: () => call("POST", "/engine/cdm/retry", {}),
     text: (text: string) => call("POST", "/text", { text }),
     join: (request: WifiJoinRequest) => call("POST", "/wifi/join", request),
     step: (key: string, direction: number) =>

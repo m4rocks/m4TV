@@ -8,7 +8,7 @@ import { joinRequest, type JoinForm, type Security } from "./wifi/wifi";
 
 const TABS: Record<Tab, string> = { wifi: "Wi-Fi", remote: "Remote", apps: "Apps", settings: "Settings" };
 
-const pad = "rounded-lg bg-gray-200 p-4 text-xl active:bg-gray-300 disabled:opacity-40";
+const pad = "rounded-lg border border-border bg-surface p-4 text-xl active:bg-raised disabled:opacity-40";
 
 export function Control({ token, onUnpaired }: { token: string; onUnpaired: () => void }) {
   const api = useMemo(() => createApi(token), [token]);
@@ -72,6 +72,15 @@ export function Control({ token, onUnpaired }: { token: string; onUnpaired: () =
       )}
       {error && <ErrorBanner>{error}</ErrorBanner>}
       {live?.notice && <StatusBanner>{live.notice}</StatusBanner>}
+      {live?.cdm.status === "preparing" && <StatusBanner>The TV is preparing video playback…</StatusBanner>}
+      {live?.cdm.status === "failed" && (
+        <ErrorBanner>
+          Video playback is not ready: {live.cdm.reason}{" "}
+          <button className="underline" onClick={() => run(api.retryCdm())}>
+            Retry
+          </button>
+        </ErrorBanner>
+      )}
 
       {tab === "remote" ? (
         <div className="space-y-4">
@@ -109,7 +118,7 @@ export function Control({ token, onUnpaired }: { token: string; onUnpaired: () =
           <button
             key={name}
             aria-current={tab === name}
-            className={`flex-1 rounded p-3 ${tab === name ? "bg-blue-600 text-white" : "bg-gray-200"}`}
+            className={`flex-1 rounded p-3 ${tab === name ? "bg-ink font-bold text-background" : "border border-border bg-surface"}`}
             onClick={() => setTab(name)}
           >
             {TABS[name]}
@@ -193,7 +202,7 @@ function Settings({
     <div className="space-y-6">
       {byCategory(live.settings).map(([category, settings]) => (
         <section key={category} aria-label={category}>
-          <h2 className="mb-2 text-sm font-bold uppercase text-gray-500">{category}</h2>
+          <h2 className="mb-2 text-sm font-bold uppercase text-muted">{category}</h2>
           <ul className="space-y-2">
             {settings.map((setting) => (
               <li key={setting.key} className="flex items-center gap-2">
@@ -297,7 +306,7 @@ function Wifi({ live, onJoin }: { live: LiveState | null; onJoin: (form: JoinFor
           <button type="button" className={pad} onClick={() => setForm(null)}>
             Back
           </button>
-          <button className="flex-1 rounded bg-blue-600 p-4 text-xl text-white">Join</button>
+          <button className={`flex-1 ${buttonPrimary} text-xl`}>Join</button>
         </div>
       </form>
     );
