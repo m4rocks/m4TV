@@ -55,7 +55,7 @@ export function Pair({ onPaired }: { onPaired: (token: string) => void }) {
       <section className="space-y-4">
         <p>Setting up this TV over its own Wi-Fi.</p>
         {fingerprint && (
-          <p className="break-all text-sm text-gray-600">
+          <p className="break-all text-sm text-muted">
             Certificate fingerprint, to compare with the TV later: {fingerprint}
           </p>
         )}
@@ -79,7 +79,7 @@ export function Pair({ onPaired }: { onPaired: (token: string) => void }) {
         <p>
           Pairing with the TV…
           {link.fp && (
-            <span className="mt-2 block break-all text-sm text-gray-600">
+            <span className="mt-2 block break-all text-sm text-muted">
               Certificate fingerprint, as shown on the TV: {link.fp}
             </span>
           )}

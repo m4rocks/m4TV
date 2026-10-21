@@ -10,7 +10,23 @@ pub struct Frame {
     pub bgra: Vec<u8>,
 }
 
+/// Whether the Widevine CDM, which protected video needs, is ready. The Engine fetches it itself
+/// once there is a network, and it is never part of the image.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Cdm {
+    Preparing,
+    Ready,
+    /// Why it could not be fetched: offline, blocked, or something else.
+    Failed(String),
+}
+
 pub trait Engine {
+    /// The CDM's state. An Engine with no DRM to prepare is always ready.
+    fn cdm(&self) -> Cdm {
+        Cdm::Ready
+    }
+    /// Starts the CDM fetch again after it failed.
+    fn retry_cdm(&mut self) {}
     fn open(&mut self, app: &AppDefinition);
     fn close(&mut self);
     /// Sends a remote key to the open App's page.

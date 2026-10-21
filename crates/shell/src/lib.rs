@@ -14,9 +14,11 @@ pub mod tokens {
 #[cfg(test)]
 mod tests {
     use super::apps::{built_in_apps, page_script, parse_catalog};
-    use super::engine::{Engine, Session};
-    use super::shell::{Key, OVERLAY_TIME, Overlay, Row, Screen, Shell};
-    use m4tv_os::{FakeOs, Os, PowerAction};
+    use super::engine::{Cdm, Engine, Session};
+    use super::shell::{Key, OVERLAY_TIME, Overlay, Row, Screen, Shell, Theme};
+    use std::time::Duration;
+    use m4tv_os::{FakeOs, Network, Os, PowerAction, WallClock};
+    use m4tv_settings::Category;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// A fake Os whose settings file is private to the calling test.
@@ -39,11 +41,16 @@ mod tests {
     struct Record {
         events: Vec<String>,
         history: bool,
+        cdm: Option<Cdm>,
     }
 
     impl FakeEngine {
         fn events(&self) -> Vec<String> {
             self.0.lock().unwrap().events.clone()
+        }
+
+        fn set_cdm(&self, cdm: Cdm) {
+            self.0.lock().unwrap().cdm = Some(cdm);
         }
 
         fn set_history(&self, history: bool) {
@@ -56,6 +63,15 @@ mod tests {
     }
 
     impl Engine for FakeEngine {
+        fn cdm(&self) -> Cdm {
+            self.0.lock().unwrap().cdm.clone().unwrap_or(Cdm::Ready)
+        }
+
+        fn retry_cdm(&mut self) {
+            self.log("retry cdm".into());
+            self.0.lock().unwrap().cdm = Some(Cdm::Preparing);
+        }
+
         fn open(&mut self, app: &super::apps::AppDefinition) {
             self.log(format!("open {}", app.id));
         }
@@ -106,8 +122,18 @@ mod tests {
     }
 
     /// Opens Settings and moves to the row with this label.
+    /// Opens Settings and moves to the row called `label`: its category on the left, then the row.
     fn at_row(shell: &mut Shell, label: &str) {
         press(shell, &[Key::Right, Key::Right, Key::Right, Key::Enter]);
+        let category = shell
+            .all_settings_rows()
+            .iter()
+            .find(|row| row.label() == label)
+            .map(Row::category)
+            .unwrap();
+        let category = shell.settings_categories().iter().position(|c| *c == category).unwrap();
+        press(shell, &vec![Key::Down; category]);
+        shell.press(Key::Enter);
         let index = shell.settings_rows().iter().position(|row| row.label() == label).unwrap();
         press(shell, &vec![Key::Down; index]);
     }
@@ -306,10 +332,19 @@ start_url = \"https://x\"
     fn the_settings_screen_lists_every_declared_setting_then_the_device_actions() {
         let mut shell = shell();
         at_row(&mut shell, "Theme");
-        let labels: Vec<_> = shell.settings_rows().iter().map(Row::label).collect();
+        let labels: Vec<_> = shell.all_settings_rows().iter().map(Row::label).collect();
         assert_eq!(
             labels,
-            ["Theme", "Reduce motion", "24-hour clock", "Volume", "Mute", "Reboot", "Power off"]
+            [
+                "Theme",
+                "Reduce motion",
+                "24-hour clock",
+                "Volume",
+                "Mute",
+                "Version",
+                "Reboot",
+                "Power off"
+            ]
         );
         assert_eq!(shell.settings_focused(), 0);
     }
@@ -321,7 +356,7 @@ start_url = \"https://x\"
         shell.press(Key::Up);
         assert_eq!(shell.settings_focused(), 0);
         press(&mut shell, &[Key::Down; 12]);
-        assert_eq!(shell.settings_focused(), 6);
+        assert_eq!(shell.settings_focused(), 2, "Display has three rows");
     }
 
     #[test]
@@ -375,6 +410,56 @@ start_url = \"https://x\"
     }
 
     #[test]
+    fn settings_has_two_panes_and_back_steps_out_one_at_a_time() {
+        let mut shell = shell();
+        press(&mut shell, &[Key::Right, Key::Right, Key::Right, Key::Enter]);
+        assert_eq!(shell.screen(), &Screen::Settings);
+        // No Remote is attached, so there is nothing to list under Network.
+        assert_eq!(
+            shell.settings_categories(),
+            [Category::Display, Category::Sound, Category::System]
+        );
+        assert!(!shell.settings_in_rows());
+
+        // Up and Down move the categories; the rows on the right follow.
+        press(&mut shell, &[Key::Up, Key::Down, Key::Down]);
+        assert_eq!(shell.settings_category(), 2);
+        assert_eq!(shell.settings_rows().iter().map(Row::label).collect::<Vec<_>>(), [
+            "Version", "Reboot", "Power off"
+        ]);
+        press(&mut shell, &[Key::Down]);
+        assert_eq!(shell.settings_category(), 2, "the last category is the end");
+
+        // Left and Right on a category change nothing; Right or Enter enters the rows.
+        press(&mut shell, &[Key::Up, Key::Left]);
+        assert!(!shell.settings_in_rows());
+        shell.press(Key::Right);
+        assert!(shell.settings_in_rows());
+        press(&mut shell, &[Key::Right, Key::Right]);
+        assert_eq!(shell.setting_text("volume"), "60", "Right changes the value in the rows");
+
+        // Back goes to the categories, a second Back leaves Settings.
+        shell.press(Key::Back);
+        assert_eq!((shell.screen(), shell.settings_in_rows()), (&Screen::Settings, false));
+        shell.press(Key::Back);
+        assert_eq!(shell.screen(), &Screen::Home);
+
+        // Settings opens on the first category again.
+        press(&mut shell, &[Key::Enter]);
+        assert_eq!((shell.settings_category(), shell.settings_in_rows()), (0, false));
+    }
+
+    #[test]
+    fn home_leaves_settings_from_either_pane() {
+        let mut shell = shell();
+        at_row(&mut shell, "Volume");
+        shell.press(Key::Home);
+        assert_eq!(shell.screen(), &Screen::Home);
+        press(&mut shell, &[Key::Enter, Key::Home]);
+        assert_eq!(shell.screen(), &Screen::Home);
+    }
+
+    #[test]
     fn left_and_right_do_nothing_on_a_device_action() {
         let os = fake_os();
         let mut shell = shell_on(&os);
@@ -387,6 +472,120 @@ start_url = \"https://x\"
     fn settings_shows_the_version_the_os_reports() {
         let os = fake_os();
         assert_eq!(shell_on(&os).version(), os.version());
+    }
+
+    #[test]
+    fn the_hero_shows_the_clock_only_once_the_time_is_known_in_the_chosen_format() {
+        let os = fake_os();
+        let mut shell = shell_on(&os);
+        assert_eq!(shell.clock_text(), None, "a Pi does not know the time at first");
+        assert!(!shell.tick(Duration::ZERO), "nothing changed yet");
+
+        os.set_clock(Some(WallClock { hour: 15, minute: 4 }));
+        assert!(shell.tick(Duration::ZERO), "the clock appearing is a change");
+        assert_eq!(shell.clock_text().as_deref(), Some("15:04"));
+        assert!(!shell.tick(Duration::ZERO), "an idle Home redraws only when the clock changes");
+        os.set_clock(Some(WallClock { hour: 15, minute: 5 }));
+        assert!(shell.tick(Duration::ZERO));
+
+        at_row(&mut shell, "24-hour clock");
+        shell.press(Key::Enter);
+        assert_eq!(shell.clock_text().as_deref(), Some("3:05 PM"));
+        os.set_clock(Some(WallClock { hour: 0, minute: 30 }));
+        assert_eq!(shell.clock_text().as_deref(), Some("12:30 AM"));
+        os.set_clock(Some(WallClock { hour: 12, minute: 0 }));
+        assert_eq!(shell.clock_text().as_deref(), Some("12:00 PM"));
+    }
+
+    #[test]
+    fn the_hotspot_takeover_shows_a_failure_but_not_a_join_under_way() {
+        let hotspot = |status: &str| Overlay::Hotspot {
+            ssid: "m4TV".into(),
+            password: "pw".into(),
+            payload: String::new(),
+            url: String::new(),
+            status: status.into(),
+        };
+        assert_eq!(hotspot("").hotspot_failure(), None);
+        assert_eq!(hotspot("Joining Home...").hotspot_failure(), None);
+        assert_eq!(hotspot("wrong password").hotspot_failure(), Some("wrong password"));
+        assert_eq!(Overlay::Volume { level: 1, muted: false }.hotspot_failure(), None);
+    }
+
+    #[test]
+    fn the_hero_status_names_the_network() {
+        let os = fake_os();
+        let shell = shell_on(&os);
+        assert_eq!(shell.status_line(), "Wi-Fi 192.168.1.20");
+        os.set_network(Network::Ethernet);
+        assert_eq!(shell.status_line(), "Ethernet");
+        os.set_network(Network::None);
+        assert_eq!(shell.status_line(), "No network");
+    }
+
+    #[test]
+    fn the_theme_and_reduce_motion_settings_reach_the_screens() {
+        let mut shell = shell();
+        assert_eq!((shell.theme(), shell.reduce_motion()), (Theme::Dark, false));
+        at_row(&mut shell, "Theme");
+        shell.press(Key::Right);
+        assert_eq!(shell.theme(), Theme::Light);
+        press(&mut shell, &[Key::Down, Key::Enter]);
+        assert!(shell.reduce_motion());
+    }
+
+    #[test]
+    fn an_app_asked_for_while_video_playback_prepares_waits_behind_an_overlay() {
+        let engine = FakeEngine::default();
+        engine.set_cdm(Cdm::Preparing);
+        let mut shell = shell_with(&fake_os(), &engine);
+        press(&mut shell, &[Key::Enter]);
+        assert_eq!(shell.screen(), &Screen::Home);
+        assert_eq!(shell.overlay(), Some(&Overlay::Cdm { reason: None }));
+        assert_eq!(engine.events(), [] as [String; 0], "nothing opened yet");
+
+        // It continues into the App by itself once the Engine has it.
+        engine.set_cdm(Cdm::Ready);
+        shell.tick(Duration::ZERO);
+        assert_eq!(shell.screen(), &Screen::App("youtube".into()));
+        assert_eq!(engine.events(), ["open youtube"]);
+        assert_eq!(shell.overlay(), None);
+    }
+
+    #[test]
+    fn a_volume_change_shows_over_the_cdm_overlay_and_the_overlay_returns() {
+        let engine = FakeEngine::default();
+        engine.set_cdm(Cdm::Preparing);
+        let mut shell = shell_with(&fake_os(), &engine);
+        press(&mut shell, &[Key::Enter, Key::VolumeUp]);
+        assert!(matches!(shell.overlay(), Some(Overlay::Volume { .. })));
+        shell.tick(Duration::ZERO);
+        assert!(matches!(shell.overlay(), Some(Overlay::Volume { .. })), "not overwritten");
+        shell.tick(OVERLAY_TIME);
+        assert_eq!(shell.overlay(), Some(&Overlay::Cdm { reason: None }));
+    }
+
+    #[test]
+    fn a_failed_cdm_says_why_retry_starts_again_and_back_gives_up() {
+        let engine = FakeEngine::default();
+        engine.set_cdm(Cdm::Failed("offline: the TV has no internet connection".into()));
+        let mut shell = shell_with(&fake_os(), &engine);
+        press(&mut shell, &[Key::Enter]);
+        let reason = Some("offline: the TV has no internet connection".to_string());
+        assert_eq!(shell.overlay(), Some(&Overlay::Cdm { reason }));
+
+        shell.press(Key::Enter); // Retry
+        assert_eq!(engine.events(), ["retry cdm"]);
+        shell.tick(Duration::ZERO);
+        assert_eq!(shell.overlay(), Some(&Overlay::Cdm { reason: None }), "preparing again");
+
+        engine.set_cdm(Cdm::Failed("blocked: the download was refused".into()));
+        shell.tick(Duration::ZERO);
+        shell.press(Key::Back);
+        assert_eq!(shell.overlay(), None);
+        engine.set_cdm(Cdm::Ready);
+        shell.tick(Duration::ZERO);
+        assert_eq!(shell.screen(), &Screen::Home, "Back cancelled the launch");
     }
 
     #[test]

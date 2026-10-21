@@ -3,19 +3,20 @@
 // Shell over a socket: newline-delimited JSON, commands one way, frames and live state the other.
 //
 //   Shell -> host   launch {session, app: {id, start_url, user_agent, script}, width, height}
-//                   close, key {key}, text {text}, back
+//                   close, key {key}, text {text}, back, cdm_retry
 //   host -> Shell   ready, frame {session, slot, width, height},
-//                   state {session, can_go_back, editable}
+//                   state {session, can_go_back, editable},
+//                   cdm {status: preparing | ready | failed, reason}
 //
 // A frame is the page's whole paint bitmap (BGRA), copied into `frame-<slot>.bgra` in the frames
 // directory (/dev/shm on the device); the message only says which slot is new.
 
-const { app, BrowserWindow, ipcMain, session } = require("electron");
+const { app, BrowserWindow, components, ipcMain, session } = require("electron");
 const fs = require("node:fs");
 const net = require("node:net");
 const path = require("node:path");
 
-const { M4TV_SOCKET, M4TV_FRAMES, M4TV_DATA } = process.env;
+const { M4TV_SOCKET, M4TV_FRAMES, M4TV_DATA, M4TV_CDM } = process.env;
 if (!M4TV_SOCKET || !M4TV_FRAMES) {
   console.error("m4tv-engine-host: M4TV_SOCKET and M4TV_FRAMES are set by the Shell");
   process.exit(2);
@@ -128,7 +129,57 @@ function key(code) {
   contents.sendInputEvent({ type: "keyUp", keyCode: code });
 }
 
+// The Widevine CDM. castLabs fetches it itself once there is a network. Where DRM cannot run (the
+// Dev host on Windows) it counts as ready, unless M4TV_CDM scripts it: ready, preparing, or
+// failed:<reason>.
+let cdm = { status: "preparing" };
+
+function reportCdm(status, reason) {
+  cdm = { status, reason };
+  send({ t: "cdm", status, reason });
+}
+
+function reasonOf(error) {
+  const text = String((error && error.message) || error);
+  if (/INTERNET_DISCONNECTED|NAME_NOT_RESOLVED|ENOTFOUND|ECONNREFUSED|ETIMEDOUT|offline/i.test(text)) {
+    return "offline: the TV has no internet connection";
+  }
+  if (/\b(401|403|451)\b|blocked|forbidden/i.test(text)) return "blocked: the download was refused";
+  return `failed: ${text}`;
+}
+
+function prepareCdm() {
+  reportCdm("preparing");
+  if (M4TV_CDM) {
+    const [status, ...reason] = M4TV_CDM.split(":");
+    setTimeout(() => reportCdm(status, reason.join(":") || undefined), 500);
+  } else if (!components) {
+    reportCdm(process.platform === "linux" ? "failed" : "ready", "this Electron has no Widevine");
+  } else if (process.platform !== "linux") {
+    reportCdm("ready");
+  } else {
+    components.whenReady().then(
+      () => reportCdm("ready"),
+      (error) => reportCdm("failed", reasonOf(error)),
+    );
+  }
+}
+
+function retryCdm() {
+  if (components && components.updateAll && !M4TV_CDM) {
+    reportCdm("preparing");
+    // whenReady() may still hold the first failure, so a finished update is what says ready.
+    components.updateAll().then(
+      () => reportCdm("ready"),
+      (error) => reportCdm("failed", reasonOf(error)),
+    );
+  } else {
+    prepareCdm();
+  }
+}
+
 const commands = {
+  cdm_retry: retryCdm,
   launch,
   close: closePage,
   key: ({ key: code }) => key(code),
@@ -147,7 +198,11 @@ app.on("window-all-closed", () => {});
 
 app.whenReady().then(() => {
   socket = net.connect(M4TV_SOCKET);
-  socket.on("connect", () => send({ t: "ready", electron: process.versions.electron }));
+  socket.on("connect", () => {
+    send({ t: "ready", electron: process.versions.electron });
+    if (cdm.status === "preparing") prepareCdm();
+    else reportCdm(cdm.status, cdm.reason);
+  });
   socket.on("close", () => app.exit(0));
   socket.on("error", (error) => {
     console.error("m4tv-engine-host:", error.message);

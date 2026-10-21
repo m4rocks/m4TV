@@ -85,7 +85,7 @@ fn write_tokens(design: &Path) {
     };
 
     let colors = tokens["color"]["dark"].as_object().expect("design/tokens.json has colours");
-    let mut out = String::from("/// One theme's colours, as 0xRRGGBB.\npub struct Palette {\n");
+    let mut out = String::from("/// One theme's colours, as 0xRRGGBB.\n#[derive(Clone, Copy)]\npub struct Palette {\n");
     for name in colors.keys() {
         out += &format!("    pub {name}: u32,\n");
     }
@@ -117,6 +117,7 @@ fn write_tokens(design: &Path) {
     for (name, ms) in tokens["motion"].as_object().expect("design/tokens.json has motion") {
         out += &format!("pub const MOTION_{}_MS: u64 = {};\n", name.to_uppercase(), ms);
     }
+    out += &format!("pub const OVERLAY_ALPHA: f32 = {:?};\n", number(&tokens["overlay_alpha"]));
     out += &format!("/// The margin for text and Tiles, as a fraction of the screen.\npub const SAFE_AREA: f32 = {:?};\n", number(&tokens["safe_area"]));
 
     let path = Path::new(&std::env::var("OUT_DIR").expect("cargo sets OUT_DIR")).join("tokens.rs");

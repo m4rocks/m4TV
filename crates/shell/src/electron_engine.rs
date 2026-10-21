@@ -23,7 +23,7 @@ use tokio::{
 
 use crate::{
     apps::{AppDefinition, page_script},
-    engine::{Engine, Frame, Session},
+    engine::{Cdm, Engine, Frame, Session},
     shell::Key,
 };
 
@@ -161,6 +161,9 @@ enum ToHost<'a> {
     Key { key: &'a str },
     Text { text: &'a str },
     Back,
+    /// Fetch the CDM again.
+    #[serde(rename = "cdm_retry")]
+    CdmRetry,
 }
 
 #[derive(Deserialize)]
@@ -169,14 +172,16 @@ enum FromHost {
     Ready {},
     Frame { session: u64, slot: u8, width: u32, height: u32 },
     State { session: u64, can_go_back: bool, editable: bool },
+    /// "preparing", "ready" or "failed" with a reason.
+    Cdm { status: String, reason: Option<String> },
 }
 
 fn line(message: &ToHost) -> String {
     serde_json::to_string(message).expect("a message is JSON")
 }
 
-#[derive(Default)]
 struct State {
+    cdm: Cdm,
     session: Session<()>,
     can_go_back: bool,
     /// The message that opened the App now open: sent again to a host that has just started.
@@ -187,6 +192,21 @@ struct State {
     outbox: VecDeque<String>,
     /// The running host's process id.
     host: Option<u32>,
+}
+
+impl Default for State {
+    fn default() -> Self {
+        Self {
+            // Nothing is ready before the first host says so.
+            cdm: Cdm::Preparing,
+            session: Session::default(),
+            can_go_back: false,
+            launch: None,
+            connected: false,
+            outbox: VecDeque::new(),
+            host: None,
+        }
+    }
 }
 
 /// What the engine and its thread share.
@@ -268,6 +288,15 @@ impl Drop for ElectronEngine {
 }
 
 impl Engine for ElectronEngine {
+    fn cdm(&self) -> Cdm {
+        self.shared.state.lock().unwrap().cdm.clone()
+    }
+
+    fn retry_cdm(&mut self) {
+        self.shared.state.lock().unwrap().cdm = Cdm::Preparing;
+        self.shared.queue(&ToHost::CdmRetry);
+    }
+
     fn open(&mut self, app: &AppDefinition) {
         let mut state = self.shared.state.lock().unwrap();
         let (session, _) = state.session.begin();
@@ -351,6 +380,8 @@ async fn supervise(config: &EngineConfig, mut endpoint: Endpoint, shared: &Share
                     // The page is gone with its host and comes back on the next one.
                     state.can_go_back = false;
                     state.session.forget_page_state();
+                    // The next host starts its fetch again.
+                    state.cdm = Cdm::Preparing;
                 }
                 let _ = host.kill().await;
                 shared.state.lock().unwrap().host = None;
@@ -428,6 +459,13 @@ fn receive(text: &str, config: &EngineConfig, state: &Mutex<State>) {
                 Ok(_) => eprintln!("a frame from the Engine host is not {width}x{height}"),
                 Err(e) => eprintln!("could not read a frame from the Engine host: {e}"),
             }
+        }
+        FromHost::Cdm { status, reason } => {
+            state.lock().unwrap().cdm = match status.as_str() {
+                "ready" => Cdm::Ready,
+                "failed" => Cdm::Failed(reason.unwrap_or_else(|| "it failed".into())),
+                _ => Cdm::Preparing,
+            };
         }
         FromHost::State { session, can_go_back, editable } => {
             let mut state = state.lock().unwrap();

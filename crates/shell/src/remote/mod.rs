@@ -46,11 +46,26 @@ pub struct LiveState {
     pub editable: bool,
     /// Every declared setting, in the declaration's order: the Remote builds its screens from this.
     pub settings: Vec<SettingState>,
+    /// Whether the Engine's video playback is ready, and if not, why.
+    pub cdm: CdmView,
     /// Whether the TV is setting itself up on the Setup hotspot, and how that is going.
     pub setup: SetupView,
     /// What the last device action or failed save said, until the next key: a phone cannot see
     /// the TV's screen, so a save that failed would otherwise go unnoticed.
     pub notice: Option<String>,
+}
+
+/// The Engine's video playback (the Widevine CDM), as the Remote sees it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, TS)]
+#[serde(tag = "status", rename_all = "lowercase")]
+pub enum CdmView {
+    Preparing,
+    #[default]
+    Ready,
+    /// Why it could not be fetched.
+    Failed {
+        reason: String,
+    },
 }
 
 /// The Setup hotspot flow, as a phone on the hotspot sees it.
@@ -125,6 +140,8 @@ pub enum Command {
     /// Moves a setting one step up (1) or down (-1) from whatever it is now.
     Step(String, i64),
     Join(JoinRequest),
+    /// Starts the CDM fetch again after it failed.
+    RetryCdm,
 }
 
 /// The running Remote server, held by the Shell. Dropping it stops the server.

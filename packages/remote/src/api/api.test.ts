@@ -26,6 +26,13 @@ test("reordering is a PUT of the whole order", async () => {
   expect(calls[0].url).toBe("/api/apps/order");
 });
 
+test("retrying video playback is a POST to the Engine", async () => {
+  const { fetch, calls } = fetchStub(204);
+  await createApi("t", fetch).retryCdm();
+  expect(calls[0].init.method).toBe("POST");
+  expect(calls[0].url).toBe("/api/engine/cdm/retry");
+});
+
 test("a refused command throws the TV's reason", async () => {
   const { fetch } = fetchStub(409, { error: "no editable field is focused" });
   await expect(createApi("t", fetch).text("hi")).rejects.toThrow("no editable field is focused");

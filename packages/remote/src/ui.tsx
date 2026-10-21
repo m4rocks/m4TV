@@ -1,14 +1,17 @@
 import type { ReactNode } from "react";
 
-export const buttonPrimary = "rounded bg-blue-600 px-4 py-3 text-white disabled:opacity-50";
-export const input = "rounded border p-3 text-lg";
-export const listButton = "rounded bg-gray-200 p-3 text-left text-lg";
+export const buttonPrimary = "rounded bg-ink px-4 py-3 font-bold text-background disabled:opacity-50";
+export const input = "rounded border border-border bg-surface p-3 text-lg text-text";
+export const listButton = "rounded border border-border bg-surface p-3 text-left text-lg";
 
 /** An error the viewer should see: a refused command, a failed pairing. */
 export function ErrorBanner({ children }: { children: ReactNode }) {
   return (
-    <p role="alert" className="rounded bg-red-100 p-3 text-red-800">
-      {children}
+    <p role="alert" className="flex gap-2 rounded border border-state bg-surface p-3 text-state">
+      <span aria-hidden className="font-bold">
+        !
+      </span>
+      <span>{children}</span>
     </p>
   );
 }
@@ -16,7 +19,7 @@ export function ErrorBanner({ children }: { children: ReactNode }) {
 /** Something the viewer should know that is not an error: the link, or what the TV said. */
 export function StatusBanner({ children }: { children: ReactNode }) {
   return (
-    <p role="status" className="rounded bg-yellow-100 p-3 text-yellow-900">
+    <p role="status" className="rounded border border-border bg-raised p-3 text-text">
       {children}
     </p>
   );

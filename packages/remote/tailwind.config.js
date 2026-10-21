@@ -14,8 +14,13 @@ const variables = (palette) =>
 export default {
   content: ["./index.html", "./src/**/*.{ts,tsx}"],
   theme: {
+    // Only the tokens' colours exist: a default palette class (bg-gray-200) is not a colour here.
+    colors: {
+      transparent: "transparent",
+      current: "currentColor",
+      ...Object.fromEntries(Object.keys(tokens.color.dark).map((name) => [name, `var(--color-${name})`])),
+    },
     extend: {
-      colors: Object.fromEntries(Object.keys(tokens.color.dark).map((name) => [name, `var(--color-${name})`])),
       borderRadius: {
         DEFAULT: px(tokens.radius.small),
         lg: px(tokens.radius.medium),

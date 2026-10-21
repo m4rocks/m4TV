@@ -13,7 +13,7 @@ use std::{
 use m4tv_shell::{
     apps::built_in_apps,
     electron_engine::{ElectronEngine, EngineConfig},
-    engine::Engine,
+    engine::{Cdm, Engine},
     shell::Key,
 };
 use serde_json::{Value, json};
@@ -246,6 +246,30 @@ async fn the_host_reports_an_editable_field_and_whether_the_page_can_go_back() {
     host.say(json!({"t": "state", "session": session, "can_go_back": true, "editable": true})).await;
     engine.open(&youtube());
     assert!(!engine.editable_focused() && !engine.can_go_back());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_engine_follows_the_hosts_video_playback_and_retry_reaches_it() {
+    let mut rig = Rig::new(ALIVE);
+    let mut engine = rig.start();
+    assert_eq!(engine.cdm(), Cdm::Preparing, "nothing is known before the host speaks");
+    let mut host = connect(&rig.endpoint()).await;
+    until("the connection", || engine.connected()).await;
+
+    host.say(json!({"t": "cdm", "status": "ready"})).await;
+    until("ready", || engine.cdm() == Cdm::Ready).await;
+    host.say(json!({"t": "cdm", "status": "failed", "reason": "offline: no internet"})).await;
+    until("the failure", || engine.cdm() == Cdm::Failed("offline: no internet".into())).await;
+
+    engine.retry_cdm();
+    assert_eq!(engine.cdm(), Cdm::Preparing, "a retry starts at once");
+    assert_eq!(host.next().await, json!({"t": "cdm_retry"}));
+
+    // A host that dies has to prepare again.
+    host.say(json!({"t": "cdm", "status": "ready"})).await;
+    until("ready", || engine.cdm() == Cdm::Ready).await;
+    drop(host);
+    until("preparing again", || engine.cdm() == Cdm::Preparing).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

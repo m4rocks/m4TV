@@ -4,7 +4,7 @@
 
 use std::{
     net::Ipv4Addr,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
 
@@ -12,6 +12,13 @@ use std::{
 pub enum PowerAction {
     Reboot,
     PowerOff,
+}
+
+/// The time of day on the wall, in the device's local time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WallClock {
+    pub hour: u8,
+    pub minute: u8,
 }
 
 /// What the device is connected to.
@@ -64,6 +71,12 @@ pub enum JoinStatus {
 /// Everything the Shell needs from the device. Power calls return the message the Shell shows.
 pub trait Os {
     fn settings_path(&self) -> PathBuf;
+    /// Where the Engine keeps its data: each App's storage and the Widevine CDM it downloads. The
+    /// CDM is never part of the image.
+    fn engine_data_path(&self) -> PathBuf;
+    /// The time of day, once the device trusts its clock. A Pi has no battery-backed clock, so
+    /// this is `None` until the time has been fetched from the network.
+    fn wall_clock(&self) -> Option<WallClock>;
     fn version(&self) -> String;
     fn reboot(&self) -> String;
     fn power_off(&self) -> String;
@@ -89,6 +102,16 @@ pub struct FakeOs {
     settings_path: PathBuf,
     log: Arc<Mutex<Vec<PowerAction>>>,
     net: Arc<Mutex<FakeNet>>,
+    clock: Arc<Mutex<FakeClock>>,
+}
+
+/// What the fake's clock says.
+#[derive(Debug, Clone, Copy)]
+enum FakeClock {
+    /// The Dev host's own clock.
+    Live,
+    /// A scripted time, or none yet.
+    Set(Option<WallClock>),
 }
 
 /// A Wi-Fi the fake knows about, and what it takes to join it.
@@ -151,12 +174,25 @@ impl Default for FakeNet {
 
 impl FakeOs {
     pub fn new(settings_path: PathBuf) -> Self {
-        Self { settings_path, log: Arc::default(), net: Arc::default() }
+        Self {
+            settings_path,
+            log: Arc::default(),
+            net: Arc::default(),
+            clock: Arc::new(Mutex::new(FakeClock::Set(None))),
+        }
     }
 
-    /// Keeps the Dev host's settings in the working directory, which git ignores.
+    /// Keeps the Dev host's settings in the working directory, which git ignores, and tells the
+    /// time by the machine's clock.
     pub fn dev_host() -> Self {
-        Self::new(PathBuf::from(".m4tv-dev/settings.toml"))
+        let os = Self::new(PathBuf::from(".m4tv-dev/settings.toml"));
+        *os.clock.lock().unwrap() = FakeClock::Live;
+        os
+    }
+
+    /// Scripts the clock: `None` is a device that does not know the time yet.
+    pub fn set_clock(&self, time: Option<WallClock>) {
+        *self.clock.lock().unwrap() = FakeClock::Set(time);
     }
 
     pub fn actions(&self) -> Vec<PowerAction> {
@@ -208,6 +244,21 @@ impl FakeOs {
 impl Os for FakeOs {
     fn settings_path(&self) -> PathBuf {
         self.settings_path.clone()
+    }
+
+    fn engine_data_path(&self) -> PathBuf {
+        self.settings_path.parent().unwrap_or(Path::new("")).join("engine")
+    }
+
+    fn wall_clock(&self) -> Option<WallClock> {
+        match *self.clock.lock().unwrap() {
+            FakeClock::Set(time) => time,
+            FakeClock::Live => {
+                use chrono::Timelike;
+                let now = chrono::Local::now();
+                Some(WallClock { hour: now.hour() as u8, minute: now.minute() as u8 })
+            }
+        }
     }
 
     fn version(&self) -> String {
@@ -340,6 +391,21 @@ mod tests {
         os.join_wifi(&request("Home", Some("nope"), Security::Wpa2, false));
         assert_eq!(os.join_status(), JoinStatus::Failed("wrong password".into()));
         assert_eq!(os.hotspot(), None);
+    }
+
+    #[test]
+    fn the_fake_does_not_know_the_time_until_it_is_told() {
+        let os = FakeOs::new("s.toml".into());
+        assert_eq!(os.wall_clock(), None);
+        os.set_clock(Some(WallClock { hour: 7, minute: 5 }));
+        assert_eq!(os.wall_clock(), Some(WallClock { hour: 7, minute: 5 }));
+        assert!(FakeOs::dev_host().wall_clock().is_some());
+    }
+
+    #[test]
+    fn the_fake_keeps_the_engines_data_beside_the_settings() {
+        let os = FakeOs::new("dir/s.toml".into());
+        assert_eq!(os.engine_data_path(), PathBuf::from("dir/engine"));
     }
 
     #[test]

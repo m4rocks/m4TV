@@ -2,13 +2,15 @@
 
 use std::time::Duration;
 
-use m4tv_os::Os;
-use m4tv_settings::{Kind, SETTINGS, SettingDef, Settings, Value};
+use m4tv_os::{Network, Os, WallClock};
+use m4tv_settings::{Category, Kind, SETTINGS, SettingDef, Settings, Value};
 
 use crate::{
     apps::AppDefinition,
-    engine::{Engine, Frame},
-    remote::{AppSummary, Command, LiveState, Phone, Remote, SettingKind, SettingState},
+    engine::{Cdm, Engine, Frame},
+    remote::{
+        AppSummary, CdmView, Command, LiveState, Phone, Remote, SettingKind, SettingState,
+    },
 };
 
 mod setup;
@@ -89,6 +91,13 @@ impl Key {
     }
 }
 
+/// The Shell's appearance, a Setting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Theme {
+    Dark,
+    Light,
+}
+
 /// How long an Overlay stays after the last thing that raised it.
 pub const OVERLAY_TIME: Duration = Duration::from_secs(2);
 
@@ -120,6 +129,31 @@ pub enum Overlay {
         address: String,
         payload: String,
     },
+    /// An App was asked for while the Engine's video playback is not ready: `reason` is why it
+    /// could not be prepared, if it could not.
+    Cdm {
+        reason: Option<String>,
+    },
+}
+
+impl Overlay {
+    /// Why the Setup hotspot is back or could not join a Wi-Fi: the Overlay's status, unless it is
+    /// only saying that a join is under way.
+    pub fn hotspot_joining(&self) -> Option<&str> {
+        match self {
+            Overlay::Hotspot { status, .. } if status.starts_with("Joining") => Some(status),
+            _ => None,
+        }
+    }
+
+    pub fn hotspot_failure(&self) -> Option<&str> {
+        match self {
+            Overlay::Hotspot { status, .. } if !status.is_empty() && self.hotspot_joining().is_none() => {
+                Some(status)
+            }
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -141,6 +175,8 @@ pub enum Row {
     Hotspot,
     /// A paired phone; Enter unpairs it.
     Phone(Phone),
+    /// The version of the Shell, shown and not changed.
+    Version(String),
     Reboot,
     PowerOff,
 }
@@ -152,8 +188,18 @@ impl Row {
             Row::Pair => "Pair a phone".into(),
             Row::Hotspot => "Setup hotspot".into(),
             Row::Phone(phone) => phone.name.clone(),
+            Row::Version(_) => "Version".into(),
             Row::Reboot => "Reboot".into(),
             Row::PowerOff => "Power off".into(),
+        }
+    }
+
+    /// The category of the Settings screen this row is listed under.
+    pub fn category(&self) -> Category {
+        match self {
+            Row::Setting(def) => def.category,
+            Row::Pair | Row::Hotspot | Row::Phone(_) => Category::Network,
+            Row::Version(_) | Row::Reboot | Row::PowerOff => Category::System,
         }
     }
 
@@ -174,6 +220,10 @@ pub struct Shell {
     settings: Settings,
     screen: Screen,
     focused: usize,
+    /// The selected category on the Settings screen, and whether the focus is in its rows.
+    settings_category: usize,
+    settings_in_rows: bool,
+    /// The row focused in the selected category.
     settings_focused: usize,
     notice: Option<String>,
     /// The Overlay showing, and how long it has left. A Pairing Overlay has no time limit.
@@ -187,6 +237,10 @@ pub struct Shell {
     /// The Settings row for the on-demand hotspot warned that it disconnects the TV, and the very
     /// next key decides whether it starts.
     hotspot_warned: bool,
+    /// An App was asked for while the Engine's video playback was not ready: it opens when it is.
+    waiting_for_app: Option<String>,
+    /// The clock as the Hero last showed it, so an idle Home redraws only when it changes.
+    clock_shown: Option<String>,
 }
 
 impl Shell {
@@ -199,6 +253,8 @@ impl Shell {
             settings,
             screen: Screen::Home,
             focused: 0,
+            settings_category: 0,
+            settings_in_rows: false,
             settings_focused: 0,
             notice: None,
             overlay: None,
@@ -207,6 +263,8 @@ impl Shell {
             phones_seen: 0,
             setup: Setup::Off,
             hotspot_warned: false,
+            waiting_for_app: None,
+            clock_shown: None,
         }
     }
 
@@ -234,18 +292,44 @@ impl Shell {
         self.focused
     }
 
-    pub fn settings_rows(&self) -> Vec<Row> {
+    /// Every row of the Settings screen, in category order.
+    pub fn all_settings_rows(&self) -> Vec<Row> {
         let phones = self.remote.iter().flat_map(|r| r.pairings().phones());
-        SETTINGS
+        let mut rows: Vec<Row> = SETTINGS
             .iter()
             .map(Row::Setting)
             .chain(self.remote.iter().map(|_| Row::Pair))
             .chain(self.remote.iter().map(|_| Row::Hotspot))
             .chain(phones.map(Row::Phone))
-            .chain([Row::Reboot, Row::PowerOff])
-            .collect()
+            .chain([Row::Version(self.os.version()), Row::Reboot, Row::PowerOff])
+            .collect();
+        rows.sort_by_key(|row| Category::ALL.iter().position(|c| *c == row.category()));
+        rows
     }
 
+    /// The categories on the Settings screen's left pane: the ones that have rows.
+    pub fn settings_categories(&self) -> Vec<Category> {
+        let rows = self.all_settings_rows();
+        Category::ALL.into_iter().filter(|c| rows.iter().any(|r| r.category() == *c)).collect()
+    }
+
+    /// The rows of the selected category: the Settings screen's right pane.
+    pub fn settings_rows(&self) -> Vec<Row> {
+        let category = self.settings_categories().get(self.settings_category).copied();
+        self.all_settings_rows().into_iter().filter(|r| Some(r.category()) == category).collect()
+    }
+
+    /// The index of the selected category.
+    pub fn settings_category(&self) -> usize {
+        self.settings_category
+    }
+
+    /// Whether the focus is in the rows (the right pane) and not on the categories.
+    pub fn settings_in_rows(&self) -> bool {
+        self.settings_in_rows
+    }
+
+    /// The focused row of the selected category.
     pub fn settings_focused(&self) -> usize {
         self.settings_focused
     }
@@ -253,6 +337,50 @@ impl Shell {
     /// The displayed value of a declared setting.
     pub fn setting_text(&self, key: &str) -> String {
         self.settings.text(key)
+    }
+
+    /// What a row shows beside its label.
+    pub fn row_value(&self, row: &Row) -> String {
+        match row {
+            Row::Setting(def) => self.setting_text(def.key),
+            Row::Version(version) => version.clone(),
+            _ => row.hint().into(),
+        }
+    }
+
+    pub fn theme(&self) -> Theme {
+        if self.number("theme") == 1 { Theme::Light } else { Theme::Dark }
+    }
+
+    pub fn reduce_motion(&self) -> bool {
+        self.number("reduce_motion") != 0
+    }
+
+    /// The time for the Hero, in the format the Setting asks for. `None` until the device knows
+    /// the time (a Pi has no battery-backed clock), so a wrong time is never shown.
+    pub fn clock_text(&self) -> Option<String> {
+        let WallClock { hour, minute } = self.os.wall_clock()?;
+        Some(if self.number("clock_24h") != 0 {
+            format!("{hour:02}:{minute:02}")
+        } else {
+            let (twelve, half) = (if hour % 12 == 0 { 12 } else { hour % 12 }, ["AM", "PM"]);
+            format!("{twelve}:{minute:02} {}", half[(hour >= 12) as usize])
+        })
+    }
+
+    /// The Hero's one-line status: the network, and how many phones are paired.
+    pub fn status_line(&self) -> String {
+        let network = match self.os.network() {
+            Network::None => "No network".to_string(),
+            Network::Ethernet => "Ethernet".to_string(),
+            Network::Wifi { address } => format!("Wi-Fi {address}"),
+        };
+        let Some(remote) = &self.remote else { return network };
+        match remote.pairings().phones().len() {
+            0 => format!("{network} · No phone paired"),
+            1 => format!("{network} · 1 phone paired"),
+            n => format!("{network} · {n} phones paired"),
+        }
     }
 
     /// What the last device action or failed save said, until the next key.
@@ -283,8 +411,42 @@ impl Shell {
         }
         let commanded = self.run_remote_commands();
         self.drive_setup(elapsed);
+        self.poll_cdm();
         self.sync_remote();
-        commanded || self.overlay != before
+        let clock = self.clock_text();
+        let clock_changed = clock != self.clock_shown;
+        self.clock_shown = clock;
+        commanded || clock_changed || self.overlay != before
+    }
+
+    /// Opens the App that was waiting for video playback once the Engine has it, and keeps the
+    /// Overlay that says why the App has not opened.
+    fn poll_cdm(&mut self) {
+        if let Some(id) = self.waiting_for_app.clone()
+            && self.engine.cdm() == Cdm::Ready
+        {
+            self.waiting_for_app = None;
+            self.open_app(&id);
+        }
+        let waiting = self.waiting_for_app.is_some();
+        if !waiting {
+            if matches!(self.overlay, Some((Overlay::Cdm { .. }, _))) {
+                self.overlay = None;
+            }
+            return;
+        }
+        // Setting the TV up comes first; the Overlay comes back when that is over.
+        if matches!(self.overlay, Some((Overlay::Hotspot { .. } | Overlay::Joined { .. }, _))) {
+            return;
+        }
+        let reason = match self.engine.cdm() {
+            Cdm::Failed(reason) => Some(reason),
+            _ => None,
+        };
+        // A volume change shows for its moment; the Overlay comes back after it.
+        if matches!(self.overlay, None | Some((Overlay::Cdm { .. }, _))) {
+            self.overlay = Some((Overlay::Cdm { reason }, Duration::MAX));
+        }
     }
 
     fn run_remote_commands(&mut self) -> bool {
@@ -293,7 +455,8 @@ impl Shell {
             ran = true;
             match command {
                 Command::Key(key) => self.press(key),
-                Command::Launch(id) => self.launch(&id),
+                Command::Launch(id) => self.open_app(&id),
+                Command::RetryCdm => self.engine.retry_cdm(),
                 Command::Order(ids) => self.reorder(&ids),
                 Command::Setting(key, value) => self.set(&key, value),
                 Command::Step(key, direction) => {
@@ -317,11 +480,17 @@ impl Shell {
         matches!(self.screen, Screen::App(_)) && self.engine.editable_focused()
     }
 
-    /// Opens an App by id, closing the one that is open.
-    fn launch(&mut self, id: &str) {
+    /// Opens an App by id, closing the one that is open. While the Engine is still preparing
+    /// video playback the App waits behind an Overlay and opens when it is ready.
+    fn open_app(&mut self, id: &str) {
         let Some(app) = self.apps.iter().find(|app| app.id == id) else {
             return;
         };
+        if self.engine.cdm() != Cdm::Ready {
+            self.waiting_for_app = Some(app.id.clone());
+            self.poll_cdm();
+            return;
+        }
         if matches!(self.screen, Screen::App(_)) {
             self.engine.close();
         }
@@ -360,10 +529,12 @@ impl Shell {
         if matches!(self.overlay, Some((Overlay::Hotspot { .. } | Overlay::Joined { .. }, _))) {
             self.overlay = None;
         }
-        // Nobody has the Remote open: show how to pair, except over a playing App.
+        // Nobody has the Remote open: show how to pair, except over a playing App, or while an App
+        // waits for video playback.
         let wanted = self.pairing_requested
             || (remote.connections() == 0 && !matches!(self.screen, Screen::App(_)));
-        if wanted {
+        let cdm_up = matches!(self.overlay, Some((Overlay::Cdm { .. }, _)));
+        if wanted && !cdm_up {
             let (pin, secret) = remote.pairings().offer();
             let overlay = Overlay::Pairing {
                 payload: remote.pairing_link(&secret),
@@ -396,6 +567,11 @@ impl Shell {
             volume: self.number("volume"),
             muted: self.number("mute") != 0,
             editable: self.editable_focused(),
+            cdm: match self.engine.cdm() {
+                Cdm::Preparing => CdmView::Preparing,
+                Cdm::Ready => CdmView::Ready,
+                Cdm::Failed(reason) => CdmView::Failed { reason },
+            },
             setup: self.setup.view(),
             notice: self.notice.clone(),
             settings: SETTINGS
@@ -439,6 +615,21 @@ impl Shell {
         if let Key::VolumeUp | Key::VolumeDown | Key::Mute = key {
             return self.press_volume(key);
         }
+        if self.waiting_for_app.is_some() {
+            match key {
+                Key::Back => {
+                    self.waiting_for_app = None;
+                    return self.poll_cdm();
+                }
+                Key::Enter => {
+                    if matches!(self.engine.cdm(), Cdm::Failed(_)) {
+                        self.engine.retry_cdm();
+                    }
+                    return;
+                }
+                _ => {}
+            }
+        }
         if key == Key::Back && self.pairing_requested {
             self.pairing_requested = false;
             return;
@@ -475,7 +666,7 @@ impl Shell {
 
     fn show_volume(&mut self) {
         // Pairing and setup are how a phone gets in, so a volume change does not cover them.
-        if matches!(self.overlay, None | Some((Overlay::Volume { .. }, _))) {
+        if matches!(self.overlay, None | Some((Overlay::Volume { .. } | Overlay::Cdm { .. }, _))) {
             let overlay =
                 Overlay::Volume { level: self.number("volume"), muted: self.number("mute") != 0 };
             self.overlay = Some((overlay, OVERLAY_TIME));
@@ -517,18 +708,18 @@ impl Shell {
         match key {
             Key::Left => self.focused = self.focused.saturating_sub(1),
             Key::Right => self.focused = (self.focused + 1).min(self.apps.len()),
-            Key::Enter => {
-                self.screen = match self.apps.get(self.focused) {
-                    Some(app) => {
-                        self.engine.open(app);
-                        Screen::App(app.id.clone())
-                    }
-                    None => {
-                        self.settings_focused = 0;
-                        Screen::Settings
-                    }
+            Key::Enter => match self.apps.get(self.focused) {
+                Some(app) => {
+                    let id = app.id.clone();
+                    self.open_app(&id);
                 }
-            }
+                None => {
+                    self.settings_category = 0;
+                    self.settings_in_rows = false;
+                    self.settings_focused = 0;
+                    self.screen = Screen::Settings;
+                }
+            },
             _ => {}
         }
     }
@@ -539,15 +730,36 @@ impl Shell {
             self.notice = Some(format!("Could not save paired phones: {e}"));
         }
         let rows = self.settings_rows().len();
-        self.settings_focused = self.settings_focused.min(rows - 1);
+        self.settings_focused = self.settings_focused.min(rows.saturating_sub(1));
     }
 
     fn press_settings(&mut self, key: Key) {
         self.notice = None;
         let warned = std::mem::take(&mut self.hotspot_warned);
+        if !self.settings_in_rows {
+            let last = self.settings_categories().len().saturating_sub(1);
+            self.settings_category = self.settings_category.min(last);
+            match key {
+                Key::Back | Key::Home => self.screen = Screen::Home,
+                Key::Up => self.settings_category = self.settings_category.saturating_sub(1),
+                Key::Down => self.settings_category = (self.settings_category + 1).min(last),
+                Key::Enter | Key::Right => {
+                    self.settings_in_rows = true;
+                    self.settings_focused = 0;
+                }
+                _ => {}
+            }
+            return;
+        }
         let rows = self.settings_rows();
+        // The category may have gone with its last row (a phone's Remote, say).
+        if rows.is_empty() {
+            self.settings_in_rows = false;
+            return;
+        }
         match key {
-            Key::Back | Key::Home => self.screen = Screen::Home,
+            Key::Back => self.settings_in_rows = false,
+            Key::Home => self.screen = Screen::Home,
             Key::Up => self.settings_focused = self.settings_focused.saturating_sub(1),
             Key::Down => self.settings_focused = (self.settings_focused + 1).min(rows.len() - 1),
             Key::VolumeUp | Key::VolumeDown | Key::Mute => {} // handled in press
@@ -559,6 +771,7 @@ impl Shell {
                 Row::Pair if key == Key::Enter => self.pairing_requested = true,
                 Row::Hotspot if key == Key::Enter => self.ask_for_hotspot(warned),
                 Row::Phone(phone) if key == Key::Enter => self.revoke(phone.id),
+                Row::Version(_) => {}
                 Row::Reboot if key == Key::Enter => self.notice = Some(self.os.reboot()),
                 Row::PowerOff if key == Key::Enter => self.notice = Some(self.os.power_off()),
                 _ => {}

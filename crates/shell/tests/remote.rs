@@ -15,7 +15,7 @@ use std::{
 use m4tv_os::{FakeOs, Network, Security};
 use m4tv_shell::{
     apps::{AppDefinition, built_in_apps},
-    engine::{Engine, Frame},
+    engine::{Cdm, Engine, Frame},
     remote::Remote,
     shell::{Key, Overlay, Shell},
 };
@@ -97,6 +97,7 @@ fn pinned_tls(fingerprint: &str) -> ClientConfig {
 struct Record {
     events: Vec<String>,
     editable: bool,
+    cdm: Option<Cdm>,
 }
 
 /// An Engine that records what the Shell asks of it. Clones share one record.
@@ -106,6 +107,10 @@ struct FakeEngine(Arc<Mutex<Record>>);
 impl FakeEngine {
     fn events(&self) -> Vec<String> {
         self.0.lock().unwrap().events.clone()
+    }
+
+    fn set_cdm(&self, cdm: Cdm) {
+        self.0.lock().unwrap().cdm = Some(cdm);
     }
 
     fn set_editable(&self, editable: bool) {
@@ -118,6 +123,13 @@ impl FakeEngine {
 }
 
 impl Engine for FakeEngine {
+    fn cdm(&self) -> Cdm {
+        self.0.lock().unwrap().cdm.clone().unwrap_or(Cdm::Ready)
+    }
+    fn retry_cdm(&mut self) {
+        self.log("retry cdm".into());
+        self.set_cdm(Cdm::Preparing);
+    }
     fn open(&mut self, app: &AppDefinition) {
         self.log(format!("open {}", app.id));
     }
@@ -450,7 +462,7 @@ fn a_client_pairs_by_the_qr_secret_and_not_the_pin() {
         .drive(pair_by_secret(async |path, body| api.post(path, None, body).await, &secret, "QR"))
         .unwrap();
     assert_eq!(rig.drive(api.get("/api/state", Some(&token))).0, 200);
-    assert!(rig.shell.settings_rows().iter().any(|r| r.label() == "QR"));
+    assert!(rig.shell.all_settings_rows().iter().any(|r| r.label() == "QR"));
 }
 
 #[test]
@@ -696,12 +708,25 @@ fn a_client_that_does_not_know_the_fingerprint_cannot_connect() {
     assert!(result.is_err());
 }
 
-/// Moves the TV's focus from Home to the Settings row at `row`.
-fn open_settings_row(rig: &mut Rig, row: usize) {
+/// Moves the TV's focus from Home to the Settings row called `label`: its category, then the row.
+fn open_settings_row(rig: &mut Rig, label: &str) {
     for _ in 0..built_in_apps().len() {
         rig.shell.press(Key::Right);
     }
     rig.shell.press(Key::Enter);
+    let category = rig
+        .shell
+        .all_settings_rows()
+        .iter()
+        .find(|r| r.label() == label)
+        .map(|r| r.category())
+        .unwrap_or_else(|| panic!("Settings has no {label} row"));
+    let category = rig.shell.settings_categories().iter().position(|c| *c == category).unwrap();
+    for _ in 0..category {
+        rig.shell.press(Key::Down);
+    }
+    rig.shell.press(Key::Enter);
+    let row = rig.shell.settings_rows().iter().position(|r| r.label() == label).unwrap();
     for _ in 0..row {
         rig.shell.press(Key::Down);
     }
@@ -714,14 +739,12 @@ fn revoking_a_phone_in_settings_refuses_its_next_request() {
     let token = rig.pair("Pixel");
     assert_eq!(rig.drive(api.get("/api/state", Some(&token))).0, 200);
 
-    // Settings lists the phone after the settings and the Pair row.
-    let rows = rig.shell.settings_rows();
-    let phone = rows.iter().position(|r| r.label() == "Pixel").expect("the phone is listed");
-    open_settings_row(&mut rig, phone);
+    // Settings lists the phone under Network, after the Pair row.
+    open_settings_row(&mut rig, "Pixel");
     rig.shell.press(Key::Enter);
 
     assert_eq!(rig.drive(api.get("/api/state", Some(&token))).0, 401);
-    assert!(rig.shell.settings_rows().iter().all(|r| r.label() != "Pixel"));
+    assert!(rig.shell.all_settings_rows().iter().all(|r| r.label() != "Pixel"));
 }
 
 #[test]
@@ -744,6 +767,32 @@ fn a_reboot_keeps_phones_paired_but_a_new_certificate_unpairs_them() {
     assert_eq!(rig.drive(api.get("/api/state", Some(&token))).0, 401);
     // The TV says why its phones must pair again.
     assert!(matches!(rig.shell.overlay(), Some(Overlay::Pairing { cert_replaced: true, .. })));
+}
+
+#[test]
+fn the_remote_sees_video_playback_prepare_and_can_retry_a_failure() {
+    let mut rig = Rig::new();
+    let api = rig.api();
+    let token = rig.pair("Pixel");
+    let cdm = |rig: &mut Rig| rig.drive(api.get("/api/state", Some(&token))).1["cdm"].clone();
+    assert_eq!(cdm(&mut rig), json!({"status": "ready"}));
+
+    // A retry is only for a failure.
+    let retry = |rig: &mut Rig| rig.drive(api.post("/api/engine/cdm/retry", Some(&token), json!({}))).0;
+    rig.engine.set_cdm(Cdm::Preparing);
+    rig.shell.tick(Duration::ZERO);
+    assert_eq!(cdm(&mut rig), json!({"status": "preparing"}));
+    assert_eq!(retry(&mut rig), 409);
+
+    rig.engine.set_cdm(Cdm::Failed("offline: the TV has no internet connection".into()));
+    rig.shell.tick(Duration::ZERO);
+    let reason = "offline: the TV has no internet connection";
+    assert_eq!(cdm(&mut rig), json!({"status": "failed", "reason": reason}));
+    assert_eq!(retry(&mut rig), 204);
+    rig.shell.tick(Duration::ZERO);
+    assert_eq!(rig.engine.events(), ["retry cdm"]);
+    rig.shell.tick(Duration::ZERO);
+    assert_eq!(cdm(&mut rig), json!({"status": "preparing"}));
 }
 
 #[test]
@@ -803,8 +852,7 @@ fn the_websocket_refuses_a_stranger_and_drops_a_revoked_phone() {
     let token = rig.pair("Pixel");
     let mut ws = rig.drive(api.connect(&token)).unwrap();
     rig.drive(state_where(&mut ws, |_| true));
-    let phone = rig.shell.settings_rows().iter().position(|r| r.label() == "Pixel").unwrap();
-    open_settings_row(&mut rig, phone);
+    open_settings_row(&mut rig, "Pixel");
     rig.shell.press(Key::Enter);
     assert!(rig.drive(closed(&mut ws)));
 }
@@ -846,8 +894,7 @@ fn settings_can_bring_the_pairing_overlay_back_for_another_phone() {
     rig.drive(async { tokio::time::sleep(Duration::from_millis(50)).await });
     assert_eq!(rig.shell.overlay(), None);
 
-    let pair_row = rig.shell.settings_rows().iter().position(|r| r.label() == "Pair a phone");
-    open_settings_row(&mut rig, pair_row.expect("Settings has a Pair row"));
+    open_settings_row(&mut rig, "Pair a phone");
     rig.shell.press(Key::Enter);
     assert!(matches!(rig.shell.overlay(), Some(Overlay::Pairing { .. })));
     rig.shell.press(Key::Back);
@@ -1237,15 +1284,14 @@ fn no_address_within_thirty_seconds_counts_as_a_failed_join() {
 #[test]
 fn settings_starts_the_hotspot_on_demand_except_on_ethernet() {
     let mut rig = Rig::new();
-    let row = rig.shell.settings_rows().iter().position(|r| r.label() == "Setup hotspot").unwrap();
-    open_settings_row(&mut rig, row);
+    open_settings_row(&mut rig, "Setup hotspot");
     // On Wi-Fi the first Enter only warns that the TV will be disconnected.
     rig.shell.press(Key::Enter);
     assert_eq!(rig.os.hotspot(), None);
     assert!(rig.shell.notice().unwrap().contains("leaves its Wi-Fi"));
     // Another key withdraws the warning, so the next Enter warns again.
-    rig.shell.press(Key::Down);
     rig.shell.press(Key::Up);
+    rig.shell.press(Key::Down);
     rig.shell.press(Key::Enter);
     assert_eq!(rig.os.hotspot(), None);
     rig.shell.press(Key::Enter);
@@ -1258,7 +1304,7 @@ fn settings_starts_the_hotspot_on_demand_except_on_ethernet() {
     rig.pairing(); // the ordinary Pairing Overlay is back, the hotspot's is gone
 
     let mut rig = Rig::in_dir_with(temp_dir(), |os| os.set_network(Network::Ethernet));
-    open_settings_row(&mut rig, row);
+    open_settings_row(&mut rig, "Setup hotspot");
     rig.shell.press(Key::Enter);
     assert_eq!(rig.os.hotspot(), None);
     assert!(rig.shell.notice().unwrap().contains("Ethernet"));
@@ -1372,8 +1418,7 @@ fn a_setting_the_shell_could_not_save_is_reported_to_the_phone() {
 #[test]
 fn a_phone_with_the_remote_open_clears_the_hotspot_panel_and_back_leaves_it_connected() {
     let mut rig = Rig::new();
-    let row = rig.shell.settings_rows().iter().position(|r| r.label() == "Setup hotspot").unwrap();
-    open_settings_row(&mut rig, row);
+    open_settings_row(&mut rig, "Setup hotspot");
     rig.shell.press(Key::Enter); // the warning
     rig.shell.press(Key::Enter);
     hotspot_overlay(&rig);
