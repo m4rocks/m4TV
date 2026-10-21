@@ -8,8 +8,11 @@ use m4tv_settings::{Kind, SETTINGS, SettingDef, Settings, Value};
 use crate::{
     apps::AppDefinition,
     engine::{Engine, Frame},
-    remote::{AppSummary, Command, LiveState, Phone, Remote},
+    remote::{AppSummary, Command, LiveState, Phone, Remote, SettingKind, SettingState},
 };
+
+mod setup;
+use setup::{Setup, setup_overlay};
 
 /// A TV-remote key. The Dev host keyboard and the Remote both produce these.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,6 +106,20 @@ pub enum Overlay {
         payload: String,
         cert_replaced: bool,
     },
+    /// The Setup hotspot: scan `payload` (a Wi-Fi QR code) or type `password` to join `ssid`,
+    /// then open the Remote at `url`. `status` says how joining a Wi-Fi is going, or why it failed.
+    Hotspot {
+        ssid: String,
+        password: String,
+        payload: String,
+        url: String,
+        status: String,
+    },
+    /// The TV joined a Wi-Fi: scan `payload` to pair at its new `address`.
+    Joined {
+        address: String,
+        payload: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,6 +137,8 @@ pub enum Row {
     Setting(&'static SettingDef),
     /// Shows the Pairing Overlay.
     Pair,
+    /// Starts the Setup hotspot, or stops one started here.
+    Hotspot,
     /// A paired phone; Enter unpairs it.
     Phone(Phone),
     Reboot,
@@ -131,6 +150,7 @@ impl Row {
         match self {
             Row::Setting(def) => def.label.into(),
             Row::Pair => "Pair a phone".into(),
+            Row::Hotspot => "Setup hotspot".into(),
             Row::Phone(phone) => phone.name.clone(),
             Row::Reboot => "Reboot".into(),
             Row::PowerOff => "Power off".into(),
@@ -141,6 +161,7 @@ impl Row {
     pub fn hint(&self) -> &'static str {
         match self {
             Row::Phone(_) => "Enter to unpair",
+            Row::Hotspot => "Enter to start or stop",
             _ => "",
         }
     }
@@ -162,6 +183,7 @@ pub struct Shell {
     pairing_requested: bool,
     /// How many phones were paired when the Shell last looked.
     phones_seen: usize,
+    setup: Setup,
 }
 
 impl Shell {
@@ -180,6 +202,7 @@ impl Shell {
             remote: None,
             pairing_requested: false,
             phones_seen: 0,
+            setup: Setup::Off,
         }
     }
 
@@ -213,6 +236,7 @@ impl Shell {
             .iter()
             .map(Row::Setting)
             .chain(self.remote.iter().map(|_| Row::Pair))
+            .chain(self.remote.iter().map(|_| Row::Hotspot))
             .chain(phones.map(Row::Phone))
             .chain([Row::Reboot, Row::PowerOff])
             .collect()
@@ -246,7 +270,7 @@ impl Shell {
     pub fn tick(&mut self, elapsed: Duration) -> bool {
         let before = self.overlay.clone();
         if let Some((overlay, left)) = &mut self.overlay
-            && !matches!(overlay, Overlay::Pairing { .. })
+            && matches!(overlay, Overlay::Volume { .. })
         {
             *left = left.saturating_sub(elapsed);
             if left.is_zero() {
@@ -254,6 +278,7 @@ impl Shell {
             }
         }
         let commanded = self.run_remote_commands();
+        self.drive_setup(elapsed);
         self.sync_remote();
         commanded || self.overlay != before
     }
@@ -266,6 +291,14 @@ impl Shell {
                 Command::Key(key) => self.press(key),
                 Command::Launch(id) => self.launch(&id),
                 Command::Order(ids) => self.reorder(&ids),
+                Command::Setting(key, value) => self.set(&key, value),
+                Command::Step(key, direction) => {
+                    self.adjust(&key, direction);
+                    if matches!(key.as_str(), "volume" | "mute") {
+                        self.show_volume();
+                    }
+                }
+                Command::Join(request) => self.join(request),
                 Command::Text(text) => {
                     if self.editable_focused() {
                         self.engine.type_text(&text);
@@ -282,7 +315,9 @@ impl Shell {
 
     /// Opens an App by id, closing the one that is open.
     fn launch(&mut self, id: &str) {
-        let Some(app) = self.apps.iter().find(|app| app.id == id) else { return };
+        let Some(app) = self.apps.iter().find(|app| app.id == id) else {
+            return;
+        };
         if matches!(self.screen, Screen::App(_)) {
             self.engine.close();
         }
@@ -301,12 +336,26 @@ impl Shell {
 
     /// Keeps the Pairing Overlay, the phone count and the Remote's view of the Shell current.
     fn sync_remote(&mut self) {
-        let Some(remote) = &self.remote else { return };
-        let phones = remote.pairings().phones().len();
+        let Some(phones) = self.remote.as_ref().map(|remote| remote.pairings().phones().len())
+        else {
+            return;
+        };
         if phones > self.phones_seen {
             self.pairing_requested = false;
+            if matches!(self.setup, Setup::Joined { .. }) {
+                self.end_handover();
+            }
         }
         self.phones_seen = phones;
+        let Some(remote) = &self.remote else { return };
+        if let Some(overlay) = setup_overlay(&self.setup, remote) {
+            self.overlay = Some((overlay, Duration::MAX));
+            remote.publish(self.live_state());
+            return;
+        }
+        if matches!(self.overlay, Some((Overlay::Hotspot { .. } | Overlay::Joined { .. }, _))) {
+            self.overlay = None;
+        }
         // Nobody has the Remote open: show how to pair, except over a playing App.
         let wanted = self.pairing_requested
             || (remote.connections() == 0 && !matches!(self.screen, Screen::App(_)));
@@ -343,6 +392,20 @@ impl Shell {
             volume: self.number("volume"),
             muted: self.number("mute") != 0,
             editable: self.editable_focused(),
+            setup: self.setup.view(),
+            notice: self.notice.clone(),
+            settings: SETTINGS
+                .iter()
+                .map(|def| SettingState {
+                    key: def.key,
+                    label: def.label,
+                    kind: match def.kind {
+                        Kind::Range { min, max, step } => SettingKind::Range { min, max, step },
+                        Kind::Toggle => SettingKind::Toggle,
+                    },
+                    value: self.settings.get(def.key),
+                })
+                .collect(),
         }
     }
 
@@ -372,6 +435,9 @@ impl Shell {
             self.pairing_requested = false;
             return;
         }
+        if key == Key::Back && self.put_setup_away() {
+            return;
+        }
         match self.screen {
             Screen::Home => self.press_home(key),
             Screen::App(_) => self.press_app(key),
@@ -396,8 +462,12 @@ impl Shell {
             Key::VolumeDown => self.adjust("volume", -1),
             _ => self.adjust("mute", 1),
         }
-        // Pairing is how a phone gets in, so a volume change does not cover it.
-        if !matches!(self.overlay, Some((Overlay::Pairing { .. }, _))) {
+        self.show_volume();
+    }
+
+    fn show_volume(&mut self) {
+        // Pairing and setup are how a phone gets in, so a volume change does not cover them.
+        if matches!(self.overlay, None | Some((Overlay::Volume { .. }, _))) {
             let overlay =
                 Overlay::Volume { level: self.number("volume"), muted: self.number("mute") != 0 };
             self.overlay = Some((overlay, OVERLAY_TIME));
@@ -407,6 +477,19 @@ impl Shell {
     /// Steps a setting and stores it, saying so if it could not be stored.
     fn adjust(&mut self, key: &str, direction: i64) {
         self.settings.adjust(key, direction);
+        self.store();
+    }
+
+    /// Sets a setting a phone asked for and stores it.
+    fn set(&mut self, key: &str, value: Value) {
+        self.settings.set(key, value);
+        self.store();
+        if matches!(key, "volume" | "mute") {
+            self.show_volume();
+        }
+    }
+
+    fn store(&mut self) {
         if let Err(e) = self.settings.save(&self.os.settings_path()) {
             self.notice = Some(format!("Could not save settings: {e}"));
         }
@@ -465,6 +548,7 @@ impl Shell {
                     self.adjust(def.key, if key == Key::Left { -1 } else { 1 });
                 }
                 Row::Pair if key == Key::Enter => self.pairing_requested = true,
+                Row::Hotspot if key == Key::Enter => self.ask_for_hotspot(),
                 Row::Phone(phone) if key == Key::Enter => self.revoke(phone.id),
                 Row::Reboot if key == Key::Enter => self.notice = Some(self.os.reboot()),
                 Row::PowerOff if key == Key::Enter => self.notice = Some(self.os.power_off()),

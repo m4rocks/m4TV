@@ -154,49 +154,71 @@ impl Render for ShellView {
                     .border_color(rgb(0x2a323c))
                     .text_2xl()
                     .child(if *muted { "Muted".to_string() } else { format!("Volume {level}") }),
-                Overlay::Pairing { pin, payload, cert_replaced } => {
-                    let code = qrcode::QrCode::new(payload.as_bytes())
-                        .expect("a pairing link fits in a QR code");
-                    let width = code.width();
-                    let modules = code.to_colors();
-                    let rows = modules.chunks(width).map(|row| {
-                        div().flex().children(row.iter().map(|module| {
-                            let dark = *module == qrcode::Color::Dark;
-                            div().size(px(6.)).bg(if dark { rgb(0x000000) } else { rgb(0xffffff) })
-                        }))
-                    });
-                    div()
-                        .absolute()
-                        .right(px(32.))
-                        .bottom(px(32.))
-                        .p_6()
-                        .flex()
-                        .flex_col()
-                        .items_center()
-                        .gap_3()
-                        .rounded_lg()
-                        .bg(rgb(0x1a2028))
-                        .border_2()
-                        .border_color(rgb(0x2a323c))
-                        .child(div().text_xl().child("Pair your phone"))
-                        .child(div().p_3().bg(rgb(0xffffff)).flex().flex_col().children(rows))
-                        .child(div().text_2xl().child(format!("PIN {pin}")))
-                        .children(cert_replaced.then(|| {
-                            div()
-                                .text_color(rgb(0xf0b429))
-                                .child("This TV's certificate changed: pair your phones again")
-                        }))
-                }
+                Overlay::Pairing { pin, payload, cert_replaced } => panel()
+                    .child(div().text_xl().child("Pair your phone"))
+                    .child(qr_code(payload))
+                    .child(div().text_2xl().child(format!("PIN {pin}")))
+                    .children(cert_replaced.then(|| {
+                        div()
+                            .text_color(rgb(0xf0b429))
+                            .child("This TV's certificate changed: pair your phones again")
+                    })),
+                Overlay::Hotspot { ssid, password, payload, url, status } => panel()
+                    .child(div().text_xl().child("Set up this TV: join its Wi-Fi"))
+                    .child(qr_code(payload))
+                    .child(div().text_2xl().child(ssid.clone()))
+                    .child(div().text_2xl().child(format!("Password {password}")))
+                    .children((!url.is_empty()).then(|| div().child(format!("Then open {url}"))))
+                    .children(
+                        (!status.is_empty())
+                            .then(|| div().text_color(rgb(0xf0b429)).child(status.clone())),
+                    ),
+                Overlay::Joined { address, payload } => panel()
+                    .child(div().text_xl().child("Connected: pair your phone"))
+                    .child(qr_code(payload))
+                    .child(div().text_2xl().child(format!("https://{address}")))
+                    .child(div().child("or https://m4tv.local")),
             }
         }))
     }
 }
 
+/// The box an Overlay with a QR code sits in.
+fn panel() -> gpui::Div {
+    div()
+        .absolute()
+        .right(px(32.))
+        .bottom(px(32.))
+        .p_6()
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap_3()
+        .rounded_lg()
+        .bg(rgb(0x1a2028))
+        .border_2()
+        .border_color(rgb(0x2a323c))
+}
+
+fn qr_code(payload: &str) -> gpui::Div {
+    let code = qrcode::QrCode::new(payload.as_bytes()).expect("a link fits in a QR code");
+    let width = code.width();
+    let modules = code.to_colors();
+    let rows = modules.chunks(width).map(|row| {
+        div().flex().children(row.iter().map(|module| {
+            let dark = *module == qrcode::Color::Dark;
+            div().size(px(6.)).bg(if dark { rgb(0x000000) } else { rgb(0xffffff) })
+        }))
+    });
+    div().p_3().bg(rgb(0xffffff)).flex().flex_col().children(rows.collect::<Vec<_>>())
+}
+
 /// The Dev host's Shell, with its Remote server. Without a Remote it still runs.
 fn dev_host_shell(engine: Box<dyn Engine>) -> Shell {
     let mut shell = Shell::new(built_in_apps(), Box::new(FakeOs::dev_host()), engine);
+    // Port 80 is for the Pi; the Dev host's hotspot listener takes an unprivileged one.
     match Remote::start(&Path::new(".m4tv-dev").join("remote"), 8443, true) {
-        Ok(remote) => shell.attach_remote(remote),
+        Ok(remote) => shell.attach_remote(remote.with_hotspot_port(8080)),
         Err(e) => eprintln!("Remote server not started: {e}"),
     }
     shell

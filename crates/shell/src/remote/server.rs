@@ -12,7 +12,7 @@ use axum::{
     Json, Router,
     body::Bytes,
     extract::{
-        Query, Request, State,
+        Path, Query, Request, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
     http::{
@@ -23,13 +23,15 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post, put},
 };
+use m4tv_os::{JoinRequest, Security};
+use m4tv_settings::{SETTINGS, Value};
 use rust_embed::RustEmbed;
 use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::{mpsc::UnboundedSender, watch};
 use ts_rs::TS;
 
-use super::{Command, LiveState, PairError, Pairings};
+use super::{Command, LiveState, PairError, Pairings, SetupView};
 use crate::shell::Key;
 
 /// How often an open WebSocket checks that its phone is still paired and still there.
@@ -52,24 +54,59 @@ pub(super) struct Shared {
     pub commands: UnboundedSender<Command>,
     pub state: Arc<watch::Sender<LiveState>>,
     pub connections: Arc<AtomicUsize>,
+    pub fingerprint: Arc<str>,
 }
 
-pub(super) fn router(shared: Shared) -> Router {
+/// The router for one listener. The HTTPS one pairs by PIN or QR secret. The Setup hotspot's
+/// plain-HTTP one cannot: a phone that has joined the hotspot knows its password, so it pairs with
+/// no PIN and is handed the certificate fingerprint (ADR 0002 amendment). Neither listener has the
+/// other's pairing, so the PIN-less one is never reachable from the LAN.
+pub(super) fn router(shared: Shared, hotspot: bool) -> Router {
     let api = Router::new()
         .route("/state", get(state))
         .route("/key", post(key))
         .route("/launch", post(launch))
         .route("/apps/order", put(order))
         .route("/text", post(text))
+        .route("/settings/{key}", put(setting))
+        .route("/settings/{key}/step", post(step))
+        .route("/wifi/join", post(join))
         .layer(middleware::from_fn_with_state(shared.clone(), authenticate));
-    Router::new()
-        .route("/api/pair", post(pair))
-        .route("/api/pair/challenge", post(challenge))
-        .route("/api/pair/prove", post(prove))
-        .route("/api/ws", get(ws))
-        .nest("/api", api)
-        .fallback_service(get(web))
-        .with_state(shared)
+    let router = Router::new().route("/api/ws", get(ws)).nest("/api", api);
+    let router = if hotspot {
+        router
+            .route("/api/hotspot", get(hotspot_fingerprint))
+            .route("/api/pair/hotspot", post(pair_on_hotspot))
+    } else {
+        router
+            .route("/api/pair", post(pair))
+            .route("/api/pair/challenge", post(challenge))
+            .route("/api/pair/prove", post(prove))
+    };
+    router.fallback_service(get(web)).with_state(shared)
+}
+
+async fn hotspot_fingerprint(State(shared): State<Shared>) -> Json<serde_json::Value> {
+    Json(json!({ "fingerprint": &*shared.fingerprint }))
+}
+
+#[derive(Deserialize, TS)]
+struct HotspotPairRequest {
+    #[serde(default)]
+    name: String,
+}
+
+async fn pair_on_hotspot(
+    State(shared): State<Shared>,
+    Json(request): Json<HotspotPairRequest>,
+) -> Response {
+    match shared.pairings.pair_open(&phone_name(&request.name)) {
+        Ok(token) => Json(json!({ "token": token })).into_response(),
+        Err(PairError::Full) => refuse(StatusCode::CONFLICT, TOO_MANY_PHONES),
+        Err(PairError::WrongPin | PairError::Save(_)) => {
+            refuse(StatusCode::INTERNAL_SERVER_ERROR, "could not save the pairing")
+        }
+    }
 }
 
 /// Serves the Remote web app. Its `index.html` is also the landing page for a browser that cannot
@@ -77,7 +114,9 @@ pub(super) fn router(shared: Shared) -> Router {
 async fn web(headers: HeaderMap, uri: Uri) -> Response {
     let path = uri.path().trim_start_matches('/');
     let path = if path.is_empty() { "index.html" } else { path };
-    let Some(file) = Web::get(path) else { return StatusCode::NOT_FOUND.into_response() };
+    let Some(file) = Web::get(path) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
     if path != "index.html" {
         return ([(CONTENT_TYPE, file.metadata.mimetype().to_string())], file.data.into_owned())
             .into_response();
@@ -92,6 +131,8 @@ async fn web(headers: HeaderMap, uri: Uri) -> Response {
         String::from_utf8_lossy(&file.data).replace("{{ADDRESS}}", &format!("https://{host}/"));
     ([(CONTENT_TYPE, "text/html; charset=utf-8")], page).into_response()
 }
+
+const TOO_MANY_PHONES: &str = "too many phones are paired: unpair one in the TV's Settings";
 
 fn refuse(status: StatusCode, error: &str) -> Response {
     (status, Json(json!({ "error": error }))).into_response()
@@ -127,6 +168,7 @@ async fn pair(State(shared): State<Shared>, Json(request): Json<PairRequest>) ->
     match shared.pairings.redeem(&request.pin, &name) {
         Ok(token) => Json(json!({ "token": token })).into_response(),
         Err(PairError::WrongPin) => refuse(StatusCode::FORBIDDEN, "wrong PIN"),
+        Err(PairError::Full) => refuse(StatusCode::CONFLICT, TOO_MANY_PHONES),
         Err(PairError::Save(_)) => {
             refuse(StatusCode::INTERNAL_SERVER_ERROR, "could not save the pairing")
         }
@@ -154,6 +196,7 @@ async fn prove(State(shared): State<Shared>, Json(request): Json<ProveRequest>) 
     match shared.pairings.prove(&request.challenge, &request.nonce, &request.proof, &name) {
         Ok(proof) => Json(json!({ "proof": proof })).into_response(),
         Err(PairError::WrongPin) => refuse(StatusCode::FORBIDDEN, "wrong secret"),
+        Err(PairError::Full) => refuse(StatusCode::CONFLICT, TOO_MANY_PHONES),
         Err(PairError::Save(_)) => {
             refuse(StatusCode::INTERNAL_SERVER_ERROR, "could not save the pairing")
         }
@@ -222,6 +265,95 @@ async fn text(State(shared): State<Shared>, Json(request): Json<TextRequest>) ->
         return refuse(StatusCode::CONFLICT, "no editable field is focused");
     }
     send(&shared, Command::Text(request.text))
+}
+
+#[derive(Deserialize, TS)]
+struct SettingRequest {
+    #[ts(type = "boolean | number")]
+    value: Value,
+}
+
+async fn setting(
+    State(shared): State<Shared>,
+    Path(key): Path<String>,
+    Json(request): Json<SettingRequest>,
+) -> Response {
+    let Some(def) = SETTINGS.iter().find(|def| def.key == key) else {
+        return refuse(StatusCode::NOT_FOUND, "no such setting");
+    };
+    if !def.accepts(request.value) {
+        return refuse(StatusCode::BAD_REQUEST, "that value is not allowed for this setting");
+    }
+    send(&shared, Command::Setting(key, request.value))
+}
+
+#[derive(Deserialize, TS)]
+struct StepRequest {
+    /// 1 or -1.
+    #[ts(type = "number")]
+    direction: i64,
+}
+
+/// A step, not a value: the Shell applies it to its own current value, so quick taps on a phone
+/// that has not heard back yet all count.
+async fn step(
+    State(shared): State<Shared>,
+    Path(key): Path<String>,
+    Json(request): Json<StepRequest>,
+) -> Response {
+    if !SETTINGS.iter().any(|def| def.key == key) {
+        return refuse(StatusCode::NOT_FOUND, "no such setting");
+    }
+    if request.direction.abs() != 1 {
+        return refuse(StatusCode::BAD_REQUEST, "a step is 1 or -1");
+    }
+    send(&shared, Command::Step(key, request.direction))
+}
+
+#[derive(Deserialize, TS)]
+struct WifiJoinRequest {
+    ssid: String,
+    #[serde(default)]
+    password: Option<String>,
+    /// "open", "wpa2" or "wpa3".
+    security: String,
+    hidden: bool,
+}
+
+/// Checks a join request the way the device would need it: a name of 1 to 32 bytes, and a WPA
+/// passphrase of 8 to 63 characters (none for an open network).
+fn valid_join(request: WifiJoinRequest) -> Result<JoinRequest, &'static str> {
+    let security = match request.security.as_str() {
+        "open" => Security::Open,
+        "wpa2" => Security::Wpa2,
+        "wpa3" => Security::Wpa3,
+        _ => return Err("security must be open, wpa2 or wpa3"),
+    };
+    if request.ssid.is_empty() || request.ssid.len() > 32 {
+        return Err("a Wi-Fi name is 1 to 32 bytes");
+    }
+    match (&security, &request.password) {
+        (Security::Open, None) => {}
+        (Security::Open, Some(_)) => return Err("an open network has no password"),
+        (_, Some(password)) if (8..=63).contains(&password.chars().count()) => {}
+        (_, _) => return Err("a WPA password is 8 to 63 characters"),
+    }
+    Ok(JoinRequest {
+        ssid: request.ssid,
+        password: request.password,
+        security,
+        hidden: request.hidden,
+    })
+}
+
+async fn join(State(shared): State<Shared>, Json(request): Json<WifiJoinRequest>) -> Response {
+    if !matches!(shared.state.borrow().setup, SetupView::Hotspot { .. }) {
+        return refuse(StatusCode::CONFLICT, "the TV is not waiting for a Wi-Fi");
+    }
+    match valid_join(request) {
+        Ok(request) => send(&shared, Command::Join(request)),
+        Err(reason) => refuse(StatusCode::BAD_REQUEST, reason),
+    }
 }
 
 #[derive(Deserialize)]
@@ -298,7 +430,7 @@ mod tests {
     use ts_rs::{Config, TS};
 
     use super::*;
-    use crate::remote::AppSummary;
+    use crate::remote::{AppSummary, SettingKind, SettingState, WifiView};
 
     /// The TypeScript types the Remote web app uses, generated from the Rust ones. Stale types
     /// fail this test; `UPDATE_TS=1 cargo test -p m4tv-shell typescript` rewrites them.
@@ -318,6 +450,14 @@ mod tests {
             LaunchRequest::decl(&cfg),
             OrderRequest::decl(&cfg),
             TextRequest::decl(&cfg),
+            SettingState::decl(&cfg),
+            SettingKind::decl(&cfg),
+            SettingRequest::decl(&cfg),
+            StepRequest::decl(&cfg),
+            SetupView::decl(&cfg),
+            WifiView::decl(&cfg),
+            WifiJoinRequest::decl(&cfg),
+            HotspotPairRequest::decl(&cfg),
         ] {
             generated += &format!("export {decl}\n\n");
         }
