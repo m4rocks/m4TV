@@ -21,7 +21,7 @@ function tv(knows = secret): Post {
     }
     return { status: 404, body: {} };
   };
-};
+}
 
 test("the QR link's fragment gives the secret and the fingerprint to compare", () => {
   expect(parseLink("#secret=abcd&fp=AA:BB")).toEqual({ secret: "abcd", fp: "AA:BB" });

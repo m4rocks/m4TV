@@ -1,4 +1,4 @@
-import { expect, test } from "vitest";
+import { expect, test, vi } from "vitest";
 import { createApi, UNREACHABLE } from "./api";
 
 function fetchStub(status: number, body?: unknown) {
@@ -49,4 +49,20 @@ test("a setting is a PUT of its value to its own path", async () => {
   expect(calls[0].init.method).toBe("PUT");
   expect(calls[0].url).toBe("/api/settings/volume");
   expect(calls[0].init.body).toBe('{"value":70}');
+});
+
+test("a TV that never answers is reported unreachable after a while", async () => {
+  vi.useFakeTimers();
+  try {
+    // A link that hangs until the request is aborted, as a phone's does after it sleeps.
+    const hang = ((_url: string, init: RequestInit) =>
+      new Promise((_resolve, reject) => {
+        init.signal!.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+      })) as unknown as typeof globalThis.fetch;
+    const result = expect(createApi("t", hang).key("Enter")).rejects.toThrow(UNREACHABLE);
+    await vi.advanceTimersByTimeAsync(5000);
+    await result;
+  } finally {
+    vi.useRealTimers();
+  }
 });

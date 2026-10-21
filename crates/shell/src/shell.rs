@@ -126,21 +126,22 @@ fn security_name(security: Security) -> &'static str {
 
 /// The Overlay the Setup flow puts up, if it is running.
 fn setup_overlay(setup: &Setup, remote: &Remote) -> Option<Overlay> {
-    let hotspot_overlay = |hotspot: &Hotspot, status: String| Overlay::Hotspot {
-        ssid: hotspot.ssid.clone(),
-        password: hotspot.password.clone(),
-        payload: wifi_qr(hotspot),
+    let hotspot_overlay = |session: &Session, status: String| Overlay::Hotspot {
+        ssid: session.hotspot.ssid.clone(),
+        password: session.hotspot.password.clone(),
+        payload: wifi_qr(&session.hotspot),
+        url: session.url.clone(),
         status,
     };
     match setup {
         Setup::Off => None,
-        Setup::Hotspot { hotspot, reason, .. } => {
-            Some(hotspot_overlay(hotspot, reason.clone().unwrap_or_default()))
+        Setup::Hotspot { session, reason, .. } => {
+            Some(hotspot_overlay(session, reason.clone().unwrap_or_default()))
         }
-        Setup::Joining { hotspot, ssid, .. } => {
-            Some(hotspot_overlay(hotspot, format!("Joining {ssid}...")))
+        Setup::Joining { session, ssid, .. } => {
+            Some(hotspot_overlay(session, format!("Joining {ssid}...")))
         }
-        Setup::Joined { address } => {
+        Setup::Joined { address, .. } => {
             let (_, secret) = remote.pairings().offer();
             Some(Overlay::Joined {
                 address: address.clone(),
@@ -168,11 +169,12 @@ pub enum Overlay {
         cert_replaced: bool,
     },
     /// The Setup hotspot: scan `payload` (a Wi-Fi QR code) or type `password` to join `ssid`,
-    /// then open the Remote. `status` says how joining a Wi-Fi is going, or why it failed.
+    /// then open the Remote at `url`. `status` says how joining a Wi-Fi is going, or why it failed.
     Hotspot {
         ssid: String,
         password: String,
         payload: String,
+        url: String,
         status: String,
     },
     /// The TV joined a Wi-Fi: scan `payload` to pair at its new `address`.
@@ -185,28 +187,41 @@ pub enum Overlay {
 /// How long a join may wait for an address before it counts as failed.
 const JOIN_TIME: Duration = Duration::from_secs(30);
 
+/// How long the phone keeps hearing from the hotspot after the TV joined a Wi-Fi, so its page can
+/// say where the TV went before the hotspot drops.
+const JOINED_GRACE: Duration = Duration::from_secs(5);
+
+/// A hotspot that is up.
+#[derive(Debug, Clone)]
+struct Session {
+    hotspot: Hotspot,
+    /// Where a phone on the hotspot opens the Remote.
+    url: String,
+    /// Settings asked for it, so a network does not make it go away by itself.
+    on_demand: bool,
+}
+
 /// Where the Setup hotspot flow is. The hotspot comes up when there is no network (or is asked
 /// for), a phone on it picks a Wi-Fi, and the TV hands over to its new address.
 #[derive(Debug, Clone)]
 enum Setup {
     Off,
     Hotspot {
-        hotspot: Hotspot,
+        session: Session,
         networks: Vec<WifiNetwork>,
         /// Why the last join failed.
         reason: Option<String>,
-        /// Settings asked for it, so a network does not make it go away by itself.
-        on_demand: bool,
     },
     Joining {
-        hotspot: Hotspot,
+        session: Session,
         ssid: String,
         waited: Duration,
-        on_demand: bool,
     },
-    /// Joined: the TV shows its new address until a phone pairs there.
+    /// Joined: the TV shows its new address until a phone pairs there. The hotspot stays up for
+    /// `hotspot_left` more, so the phone is told.
     Joined {
         address: String,
+        hotspot_left: Option<Duration>,
     },
 }
 
@@ -484,7 +499,7 @@ impl Shell {
                         .collect(),
                 },
                 Setup::Joining { ssid, .. } => SetupView::Joining { ssid: ssid.clone() },
-                Setup::Joined { address } => SetupView::Joined { address: address.clone() },
+                Setup::Joined { address, .. } => SetupView::Joined { address: address.clone() },
             },
             settings: SETTINGS
                 .iter()
@@ -554,6 +569,10 @@ impl Shell {
             Key::VolumeDown => self.adjust("volume", -1),
             _ => self.adjust("mute", 1),
         }
+        self.show_volume();
+    }
+
+    fn show_volume(&mut self) {
         // Pairing and setup are how a phone gets in, so a volume change does not cover them.
         if matches!(self.overlay, None | Some((Overlay::Volume { .. }, _))) {
             let overlay =
@@ -570,8 +589,9 @@ impl Shell {
             Setup::Off if network == Network::None && self.remote.is_some() => {
                 self.start_hotspot(false)
             }
-            Setup::Hotspot { on_demand, .. }
-                if network == Network::Ethernet || (network != Network::None && !*on_demand) =>
+            Setup::Hotspot { session, .. }
+                if network == Network::Ethernet
+                    || (network != Network::None && !session.on_demand) =>
             {
                 self.stop_hotspot()
             }
@@ -580,8 +600,7 @@ impl Shell {
                 let timed_out = *waited >= JOIN_TIME;
                 match self.os.join_status() {
                     JoinStatus::Joined { address } => {
-                        self.stop_hotspot();
-                        self.setup = Setup::Joined { address };
+                        self.setup = Setup::Joined { address, hotspot_left: Some(JOINED_GRACE) };
                     }
                     JoinStatus::Failed(reason) => self.hotspot_again(reason),
                     _ if timed_out => self.hotspot_again(format!(
@@ -591,47 +610,67 @@ impl Shell {
                     _ => {}
                 }
             }
+            // The network went away again: the hotspot is back on the next turn.
+            Setup::Joined { .. } if network == Network::None => self.stop_hotspot(),
+            Setup::Joined { hotspot_left: left @ Some(_), .. } => {
+                let remaining = left.unwrap_or_default().saturating_sub(elapsed);
+                *left = Some(remaining);
+                if remaining.is_zero() {
+                    *left = None;
+                    self.drop_hotspot();
+                }
+            }
             _ => {}
         }
     }
 
     fn start_hotspot(&mut self, on_demand: bool) {
         let hotspot = new_hotspot();
-        self.os.start_hotspot(&hotspot);
-        if let Some(remote) = &mut self.remote {
-            remote.serve_hotspot(true);
-        }
+        let address = self.os.start_hotspot(&hotspot);
+        let served = self.remote.as_mut().and_then(|remote| remote.open_hotspot(address));
+        // Port 80 is what a browser assumes.
+        let url = served.map_or(String::new(), |served| match served.port() {
+            80 => format!("http://{address}"),
+            port => format!("http://{address}:{port}"),
+        });
         let networks = self.os.scan_wifi();
-        self.setup = Setup::Hotspot { hotspot, networks, reason: None, on_demand };
+        let session = Session { hotspot, url, on_demand };
+        self.setup = Setup::Hotspot { session, networks, reason: None };
+    }
+
+    /// Stops broadcasting and serving on the hotspot.
+    fn drop_hotspot(&mut self) {
+        self.os.stop_hotspot();
+        if let Some(remote) = &mut self.remote {
+            remote.close_hotspot();
+        }
     }
 
     fn stop_hotspot(&mut self) {
-        self.os.stop_hotspot();
-        if let Some(remote) = &mut self.remote {
-            remote.serve_hotspot(false);
-        }
+        self.drop_hotspot();
         self.setup = Setup::Off;
     }
 
     /// A join failed: the hotspot comes back, saying why. The phone's listener never went away.
     fn hotspot_again(&mut self, reason: String) {
-        let (Setup::Joining { hotspot, on_demand, .. } | Setup::Hotspot { hotspot, on_demand, .. }) =
+        let (Setup::Joining { session, .. } | Setup::Hotspot { session, .. }) =
             std::mem::replace(&mut self.setup, Setup::Off)
         else {
             return;
         };
-        self.os.start_hotspot(&hotspot);
+        // A join that was given up on must not finish later and pull the TV off the hotspot.
+        self.os.cancel_join();
+        self.os.start_hotspot(&session.hotspot);
         let networks = self.os.scan_wifi();
-        self.setup = Setup::Hotspot { hotspot, networks, reason: Some(reason), on_demand };
+        self.setup = Setup::Hotspot { session, networks, reason: Some(reason) };
     }
 
     fn join(&mut self, request: m4tv_os::JoinRequest) {
-        let Setup::Hotspot { hotspot, on_demand, .. } = &self.setup else { return };
+        let Setup::Hotspot { session, .. } = &self.setup else { return };
         let joining = Setup::Joining {
-            hotspot: hotspot.clone(),
+            session: session.clone(),
             ssid: request.ssid.clone(),
             waited: Duration::ZERO,
-            on_demand: *on_demand,
         };
         self.os.join_wifi(&request);
         self.setup = joining;
@@ -656,7 +695,7 @@ impl Shell {
                 }
                 true
             }
-            Setup::Hotspot { on_demand: true, .. } => {
+            Setup::Hotspot { session: Session { on_demand: true, .. }, .. } => {
                 self.stop_hotspot();
                 true
             }
@@ -674,6 +713,9 @@ impl Shell {
     fn set(&mut self, key: &str, value: Value) {
         self.settings.set(key, value);
         self.store();
+        if matches!(key, "volume" | "mute") {
+            self.show_volume();
+        }
     }
 
     fn store(&mut self) {

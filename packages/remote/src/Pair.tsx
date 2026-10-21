@@ -40,7 +40,8 @@ export function Pair({ onPaired }: { onPaired: (token: string) => void }) {
     // Once, on the scan: a retry is the PIN form (or the button on the hotspot) below.
     if (link) void run(pairBySecret(post, link.secret, NAME));
     else if (onHotspot) {
-      void run(pairOnHotspot(post, NAME));
+      // Pairing here has no PIN to type, so it waits for a tap rather than adding a phone on
+      // every page load.
       fetch("/api/hotspot")
         .then((response) => response.json())
         .then((body) => setFingerprint(body.fingerprint))

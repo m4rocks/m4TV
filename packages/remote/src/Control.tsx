@@ -5,6 +5,8 @@ import type { LiveState } from "./protocol/api";
 import { stepped } from "./settings/settings";
 import { joinRequest, type JoinForm, type Security } from "./wifi/wifi";
 
+const TABS = { wifi: "Wi-Fi", remote: "Remote", apps: "Apps", settings: "Settings" };
+
 const pad = "rounded-lg bg-gray-200 p-4 text-xl active:bg-gray-300 disabled:opacity-40";
 
 export function Control({ token, onUnpaired }: { token: string; onUnpaired: () => void }) {
@@ -38,6 +40,8 @@ export function Control({ token, onUnpaired }: { token: string; onUnpaired: () =
   // A revoked phone (or a replaced certificate) is refused at the WebSocket, which looks like an
   // unreachable TV: ask the API, which says 401, and go back to pairing.
   useEffect(() => {
+    // Whatever failed before, the link is back.
+    if (link === "live") setError("");
     if (link !== "offline") return;
     fetch("/api/state", { headers: { Authorization: `Bearer ${token}` } })
       .then((response) => response.status === 401 && onUnpaired())
@@ -109,10 +113,10 @@ export function Control({ token, onUnpaired }: { token: string; onUnpaired: () =
           <button
             key={name}
             aria-current={tab === name}
-            className={`flex-1 rounded p-3 capitalize ${tab === name ? "bg-blue-600 text-white" : "bg-gray-200"}`}
+            className={`flex-1 rounded p-3 ${tab === name ? "bg-blue-600 text-white" : "bg-gray-200"}`}
             onClick={() => setTab(name)}
           >
-            {name}
+            {TABS[name]}
           </button>
         ))}
       </nav>

@@ -980,7 +980,7 @@ fn the_remote_refuses_settings_the_shell_would_not_take() {
 /// The hotspot Overlay the TV shows: name, password, Wi-Fi QR payload and status line.
 fn hotspot_overlay(rig: &Rig) -> (String, String, String, String) {
     match rig.shell.overlay() {
-        Some(Overlay::Hotspot { ssid, password, payload, status }) => {
+        Some(Overlay::Hotspot { ssid, password, payload, status, .. }) => {
             (ssid.clone(), password.clone(), payload.clone(), status.clone())
         }
         other => panic!("no hotspot Overlay is showing: {other:?}"),
@@ -1042,6 +1042,15 @@ fn the_remote_is_served_over_plain_http_while_the_hotspot_is_up_and_hands_over_t
     assert_eq!(body["fingerprint"], rig.fingerprint.as_str());
     assert_eq!(rig.drive(http.get("/api/state", None)).0, 401, "the API still needs a phone");
 
+    // The TV tells the viewer where to point the browser: the address the OS gave the hotspot.
+    let Some(Overlay::Hotspot { url, .. }) = rig.shell.overlay() else { panic!("no hotspot") };
+    assert_eq!(*url, format!("http://{}", rig.hotspot_addr));
+
+    // The PIN and QR-secret pairing are the LAN's: this PIN-less listener must not offer them.
+    for path in ["/api/pair", "/api/pair/challenge", "/api/pair/prove"] {
+        assert_eq!(rig.drive(http.post(path, None, json!({}))).0, 405, "{path}");
+    }
+
     // The open pairing exists only on the hotspot's listener, never on the LAN's HTTPS.
     let api = rig.api();
     // (A POST there reaches the static-file fallback, which only answers GET.)
@@ -1071,14 +1080,19 @@ fn a_phone_on_the_hotspot_picks_a_wifi_and_the_tv_hands_over_to_its_new_address(
     assert_eq!(join_status(&mut rig, &token, join), 204);
     rig.shell.tick(Duration::ZERO);
 
-    // The hotspot drops, and the TV shows the new address with a Pairing QR for it.
-    assert_eq!(rig.os.hotspot(), None);
+    // The TV shows the new address with a Pairing QR for it, and the phone is told too.
     let Some(Overlay::Joined { address, payload }) = rig.shell.overlay().cloned() else {
         panic!("no handover Overlay: {:?}", rig.shell.overlay());
     };
     assert_eq!(address, "10.0.0.7");
     assert!(payload.starts_with("https://10.0.0.7:"), "{payload}");
     assert_eq!(fragment_field(&payload, "fp"), rig.fingerprint);
+    assert_eq!(setup_state(&mut rig, &token), json!({"phase": "joined", "address": "10.0.0.7"}));
+
+    // Then the hotspot drops, listener included.
+    assert!(rig.os.hotspot().is_some());
+    rig.shell.tick(Duration::from_secs(5));
+    assert_eq!(rig.os.hotspot(), None);
     let http = rig.hotspot_api();
     assert!(!rig.drive(http.reachable("/api/hotspot")), "the hotspot's listener is gone");
 
@@ -1196,4 +1210,67 @@ fn settings_starts_the_hotspot_on_demand_except_on_ethernet() {
     rig.shell.press(Key::Enter);
     assert_eq!(rig.os.hotspot(), None);
     assert!(rig.shell.notice().unwrap().contains("Ethernet"));
+}
+
+#[test]
+fn a_join_that_was_given_up_on_cannot_finish_later_and_pull_the_tv_off_the_hotspot() {
+    let mut rig = Rig::offline();
+    rig.os.stall_dhcp(true);
+    let token = pair_on_hotspot(&mut rig);
+    let body = json!({"ssid": "Home", "password": "hunter22", "security": "wpa2", "hidden": false});
+    assert_eq!(join_status(&mut rig, &token, body), 204);
+    rig.shell.tick(Duration::from_secs(31));
+    assert_eq!(setup_state(&mut rig, &token)["phase"], "hotspot");
+
+    // The router answers at last, too late.
+    rig.os.stall_dhcp(false);
+    rig.shell.tick(Duration::ZERO);
+    assert_eq!(setup_state(&mut rig, &token)["phase"], "hotspot");
+    assert!(rig.os.hotspot().is_some());
+}
+
+#[test]
+fn the_hotspot_comes_back_if_the_network_is_lost_after_a_join() {
+    let mut rig = Rig::offline();
+    let token = pair_on_hotspot(&mut rig);
+    let body = json!({"ssid": "Home", "password": "hunter22", "security": "wpa2", "hidden": false});
+    assert_eq!(join_status(&mut rig, &token, body), 204);
+    rig.shell.tick(Duration::ZERO); // the join registers
+    rig.shell.tick(Duration::from_secs(5)); // and the hotspot's grace runs out
+    assert_eq!(rig.os.hotspot(), None);
+
+    rig.os.set_network(Network::None);
+    rig.shell.tick(Duration::ZERO); // the handover is over
+    rig.shell.tick(Duration::ZERO); // and the hotspot is back
+    assert!(rig.os.hotspot().is_some());
+    hotspot_overlay(&rig);
+    assert_eq!(setup_state(&mut rig, &token)["phase"], "hotspot");
+}
+
+#[test]
+fn a_volume_change_from_a_phone_shows_on_the_tv_like_one_from_its_keys() {
+    let mut rig = Rig::new();
+    let api = rig.api();
+    let token = rig.pair("Pixel");
+    // Pairing keeps its Overlay on screen until a phone has the Remote open.
+    let mut ws = rig.drive(api.connect(&token)).unwrap();
+    rig.drive(state_where(&mut ws, |_| true)); // the Remote is counted as open before it is sent
+    rig.shell.tick(Duration::ZERO);
+    assert_eq!(rig.shell.overlay(), None);
+    let (status, _) =
+        rig.drive(api.put("/api/settings/volume", Some(&token), json!({"value": 70})));
+    assert_eq!(status, 204);
+    rig.shell.tick(Duration::ZERO);
+    assert_eq!(rig.shell.overlay(), Some(&Overlay::Volume { level: 70, muted: false }));
+}
+
+#[test]
+fn only_sixteen_phones_can_pair_on_the_hotspot() {
+    let mut rig = Rig::offline();
+    for _ in 0..16 {
+        pair_on_hotspot(&mut rig);
+    }
+    let http = rig.hotspot_api();
+    let (status, body) = rig.drive(http.post("/api/pair/hotspot", None, json!({"name": "17th"})));
+    assert_eq!(status, 409, "{body}");
 }

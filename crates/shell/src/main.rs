@@ -163,12 +163,12 @@ impl Render for ShellView {
                             .text_color(rgb(0xf0b429))
                             .child("This TV's certificate changed: pair your phones again")
                     })),
-                Overlay::Hotspot { ssid, password, payload, status } => panel()
+                Overlay::Hotspot { ssid, password, payload, url, status } => panel()
                     .child(div().text_xl().child("Set up this TV: join its Wi-Fi"))
                     .child(qr_code(payload))
                     .child(div().text_2xl().child(ssid.clone()))
                     .child(div().text_2xl().child(format!("Password {password}")))
-                    .child(div().child("Then open http://m4tv.local"))
+                    .children((!url.is_empty()).then(|| div().child(format!("Then open {url}"))))
                     .children(
                         (!status.is_empty())
                             .then(|| div().text_color(rgb(0xf0b429)).child(status.clone())),

@@ -32,8 +32,14 @@ pub struct Phone {
 #[derive(Debug)]
 pub enum PairError {
     WrongPin,
+    /// Too many phones are paired already.
+    Full,
     Save(io::Error),
 }
+
+/// More phones than a home has. The Setup hotspot pairs with no PIN, so this keeps anyone who can
+/// reach it from filling the store.
+const MAX_PHONES: usize = 16;
 
 #[derive(Clone, Serialize, Deserialize)]
 struct Stored {
@@ -131,6 +137,9 @@ impl Inner {
 
     /// Pairs a phone under `token` and ends the offer that paired it.
     fn pair(&mut self, name: &str, token: String) -> Result<(), PairError> {
+        if self.phones.len() >= MAX_PHONES {
+            return Err(PairError::Full);
+        }
         let id = self.phones.iter().map(|p| p.id).max().map_or(1, |id| id + 1);
         self.phones.push(Stored { id, name: name.to_string(), token });
         if let Err(e) = self.save() {

@@ -57,7 +57,11 @@ pub(super) struct Shared {
     pub fingerprint: Arc<str>,
 }
 
-pub(super) fn router(shared: Shared) -> Router {
+/// The router for one listener. The HTTPS one pairs by PIN or QR secret. The Setup hotspot's
+/// plain-HTTP one cannot: a phone that has joined the hotspot knows its password, so it pairs with
+/// no PIN and is handed the certificate fingerprint (ADR 0002 amendment). Neither listener has the
+/// other's pairing, so the PIN-less one is never reachable from the LAN.
+pub(super) fn router(shared: Shared, hotspot: bool) -> Router {
     let api = Router::new()
         .route("/state", get(state))
         .route("/key", post(key))
@@ -67,25 +71,18 @@ pub(super) fn router(shared: Shared) -> Router {
         .route("/settings/{key}", put(setting))
         .route("/wifi/join", post(join))
         .layer(middleware::from_fn_with_state(shared.clone(), authenticate));
-    Router::new()
-        .route("/api/pair", post(pair))
-        .route("/api/pair/challenge", post(challenge))
-        .route("/api/pair/prove", post(prove))
-        .route("/api/ws", get(ws))
-        .nest("/api", api)
-        .fallback_service(get(web))
-        .with_state(shared)
-}
-
-/// The router for the Setup hotspot's plain-HTTP listener: the ordinary API, plus the two things
-/// that only make sense there. A phone that has joined the hotspot knows its password, so it can
-/// pair with no PIN and is handed the certificate fingerprint (ADR 0002 amendment).
-pub(super) fn hotspot_router(shared: Shared) -> Router {
-    Router::new()
-        .route("/api/hotspot", get(hotspot_fingerprint))
-        .route("/api/pair/hotspot", post(pair_on_hotspot))
-        .with_state(shared.clone())
-        .merge(router(shared))
+    let router = Router::new().route("/api/ws", get(ws)).nest("/api", api);
+    let router = if hotspot {
+        router
+            .route("/api/hotspot", get(hotspot_fingerprint))
+            .route("/api/pair/hotspot", post(pair_on_hotspot))
+    } else {
+        router
+            .route("/api/pair", post(pair))
+            .route("/api/pair/challenge", post(challenge))
+            .route("/api/pair/prove", post(prove))
+    };
+    router.fallback_service(get(web)).with_state(shared)
 }
 
 async fn hotspot_fingerprint(State(shared): State<Shared>) -> Json<serde_json::Value> {
@@ -104,7 +101,10 @@ async fn pair_on_hotspot(
 ) -> Response {
     match shared.pairings.pair_open(&phone_name(&request.name)) {
         Ok(token) => Json(json!({ "token": token })).into_response(),
-        Err(_) => refuse(StatusCode::INTERNAL_SERVER_ERROR, "could not save the pairing"),
+        Err(PairError::Full) => refuse(StatusCode::CONFLICT, TOO_MANY_PHONES),
+        Err(PairError::WrongPin | PairError::Save(_)) => {
+            refuse(StatusCode::INTERNAL_SERVER_ERROR, "could not save the pairing")
+        }
     }
 }
 
@@ -130,6 +130,8 @@ async fn web(headers: HeaderMap, uri: Uri) -> Response {
         String::from_utf8_lossy(&file.data).replace("{{ADDRESS}}", &format!("https://{host}/"));
     ([(CONTENT_TYPE, "text/html; charset=utf-8")], page).into_response()
 }
+
+const TOO_MANY_PHONES: &str = "too many phones are paired: unpair one in the TV's Settings";
 
 fn refuse(status: StatusCode, error: &str) -> Response {
     (status, Json(json!({ "error": error }))).into_response()
@@ -165,6 +167,7 @@ async fn pair(State(shared): State<Shared>, Json(request): Json<PairRequest>) ->
     match shared.pairings.redeem(&request.pin, &name) {
         Ok(token) => Json(json!({ "token": token })).into_response(),
         Err(PairError::WrongPin) => refuse(StatusCode::FORBIDDEN, "wrong PIN"),
+        Err(PairError::Full) => refuse(StatusCode::CONFLICT, TOO_MANY_PHONES),
         Err(PairError::Save(_)) => {
             refuse(StatusCode::INTERNAL_SERVER_ERROR, "could not save the pairing")
         }
@@ -192,6 +195,7 @@ async fn prove(State(shared): State<Shared>, Json(request): Json<ProveRequest>) 
     match shared.pairings.prove(&request.challenge, &request.nonce, &request.proof, &name) {
         Ok(proof) => Json(json!({ "proof": proof })).into_response(),
         Err(PairError::WrongPin) => refuse(StatusCode::FORBIDDEN, "wrong secret"),
+        Err(PairError::Full) => refuse(StatusCode::CONFLICT, TOO_MANY_PHONES),
         Err(PairError::Save(_)) => {
             refuse(StatusCode::INTERNAL_SERVER_ERROR, "could not save the pairing")
         }

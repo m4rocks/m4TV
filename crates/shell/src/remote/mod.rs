@@ -128,13 +128,13 @@ pub struct Remote {
     connections: Arc<AtomicUsize>,
     mdns: Option<mdns_sd::ServiceDaemon>,
     shared: server::Shared,
-    lan: bool,
     hotspot_port: u16,
     hotspot: Option<HotspotListener>,
 }
 
 /// The plain-HTTP listener that exists only while the Setup hotspot is up.
 struct HotspotListener {
+    addr: SocketAddr,
     stop: tokio::sync::oneshot::Sender<()>,
     stopped: std::sync::mpsc::Receiver<()>,
 }
@@ -170,7 +170,7 @@ impl Remote {
             connections: connections.clone(),
             fingerprint: identity.fingerprint.clone().into(),
         };
-        let app = server::router(shared.clone());
+        let app = server::router(shared.clone(), false);
         {
             let _enter = runtime.enter();
             let server = axum_server::from_tcp_rustls(listener, config)?;
@@ -192,7 +192,6 @@ impl Remote {
             connections,
             mdns,
             shared,
-            lan,
             hotspot_port: if lan { 80 } else { 0 },
             hotspot: None,
         })
@@ -205,28 +204,33 @@ impl Remote {
         self
     }
 
-    /// Starts or stops the plain-HTTP listener for phones on the Setup hotspot. Stopping returns
-    /// once the port is closed, idle connections included.
-    pub(crate) fn serve_hotspot(&mut self, on: bool) {
-        if !on {
-            if let Some(listener) = self.hotspot.take() {
-                let _ = listener.stop.send(());
-                let _ = listener.stopped.recv_timeout(std::time::Duration::from_secs(2));
-            }
-        } else if self.hotspot.is_none() {
-            match self.bind_hotspot() {
+    /// Starts the plain-HTTP listener for phones on the Setup hotspot, on the hotspot's own
+    /// `address` so the LAN cannot reach it, and returns where it listens (None if it could not
+    /// bind).
+    pub(crate) fn open_hotspot(&mut self, address: Ipv4Addr) -> Option<SocketAddr> {
+        if self.hotspot.is_none() {
+            match self.bind_hotspot(address) {
                 Ok(listener) => self.hotspot = Some(listener),
                 Err(e) => eprintln!("Remote on the Setup hotspot not started: {e}"),
             }
         }
+        self.hotspot.as_ref().map(|listener| listener.addr)
     }
 
-    fn bind_hotspot(&self) -> io::Result<HotspotListener> {
+    /// Stops the hotspot's listener. Returns once its port is closed, idle connections included.
+    pub(crate) fn close_hotspot(&mut self) {
+        if let Some(listener) = self.hotspot.take() {
+            let _ = listener.stop.send(());
+            let _ = listener.stopped.recv_timeout(std::time::Duration::from_secs(2));
+        }
+    }
+
+    fn bind_hotspot(&self, address: Ipv4Addr) -> io::Result<HotspotListener> {
         let runtime = self.runtime.as_ref().expect("the runtime lives until drop");
-        let bind = if self.lan { Ipv4Addr::UNSPECIFIED } else { Ipv4Addr::LOCALHOST };
-        let listener = TcpListener::bind((bind, self.hotspot_port))?;
+        let listener = TcpListener::bind((address, self.hotspot_port))?;
         listener.set_nonblocking(true)?;
-        let app = server::hotspot_router(self.shared.clone());
+        let addr = listener.local_addr()?;
+        let app = server::router(self.shared.clone(), true);
         let (stop, stop_rx) = tokio::sync::oneshot::channel::<()>();
         let (stopped_tx, stopped) = std::sync::mpsc::channel();
         let _enter = runtime.enter();
@@ -240,7 +244,7 @@ impl Remote {
             }
             let _ = stopped_tx.send(());
         });
-        Ok(HotspotListener { stop, stopped })
+        Ok(HotspotListener { addr, stop, stopped })
     }
 
     /// Where the server listens, as seen from this machine.

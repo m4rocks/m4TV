@@ -3,6 +3,7 @@
 //! implementation for the Pi and a fake for the Dev host. The Shell never calls device APIs itself.
 
 use std::{
+    net::Ipv4Addr,
     path::PathBuf,
     sync::{Arc, Mutex},
 };
@@ -67,13 +68,16 @@ pub trait Os {
     fn reboot(&self) -> String;
     fn power_off(&self) -> String;
     fn network(&self) -> Network;
-    fn start_hotspot(&self, hotspot: &Hotspot);
+    /// Starts broadcasting and returns the address a phone on the hotspot reaches the TV at.
+    fn start_hotspot(&self, hotspot: &Hotspot) -> Ipv4Addr;
     fn stop_hotspot(&self);
     /// The visible Wi-Fi networks, hidden ones not included.
     fn scan_wifi(&self) -> Vec<WifiNetwork>;
     /// Starts joining. Never blocks: the outcome shows up in `join_status`.
     fn join_wifi(&self, request: &JoinRequest);
     fn join_status(&self) -> JoinStatus;
+    /// Gives up on a join that has not finished, so it cannot finish later.
+    fn cancel_join(&self);
 }
 
 /// The Dev host's stand-in: power actions are recorded and announced, never carried out.
@@ -99,9 +103,34 @@ struct FakeNet {
     network: Network,
     hotspot: Option<Hotspot>,
     wifi: Vec<FakeWifi>,
-    /// The router never hands out an address, so a join never finishes.
+    /// The router is not answering DHCP: a join waits in `pending` until it does.
     stall: bool,
+    pending: Option<JoinRequest>,
     join: JoinStatus,
+}
+
+impl FakeNet {
+    /// Works out how a join to `request` goes.
+    fn finish_join(&mut self, request: &JoinRequest) {
+        let found = self
+            .wifi
+            .iter()
+            .find(|w| w.network.ssid == request.ssid && (!w.hidden || request.hidden));
+        self.join = match found {
+            None => JoinStatus::Failed("that network was not found".into()),
+            Some(w) if w.network.security != request.security => {
+                JoinStatus::Failed("the network uses a different security type".into())
+            }
+            Some(w) if w.password != request.password => {
+                JoinStatus::Failed("wrong password".into())
+            }
+            Some(w) => {
+                let address = w.address.clone();
+                self.network = Network::Wifi { address: address.clone() };
+                JoinStatus::Joined { address }
+            }
+        };
+    }
 }
 
 impl Default for FakeNet {
@@ -112,6 +141,7 @@ impl Default for FakeNet {
             hotspot: None,
             wifi: Vec::new(),
             stall: false,
+            pending: None,
             join: JoinStatus::Idle,
         }
     }
@@ -153,9 +183,14 @@ impl FakeOs {
         });
     }
 
-    /// Makes joins hang, as a router that never answers DHCP does.
+    /// Makes joins wait, as a router that is slow to answer DHCP does. Turning it off lets a join
+    /// that is still waiting finish.
     pub fn stall_dhcp(&self, stall: bool) {
-        self.net.lock().unwrap().stall = stall;
+        let mut net = self.net.lock().unwrap();
+        net.stall = stall;
+        if !stall && let Some(request) = net.pending.take() {
+            net.finish_join(&request);
+        }
     }
 
     /// The hotspot being broadcast, if any.
@@ -191,10 +226,11 @@ impl Os for FakeOs {
         self.net.lock().unwrap().network.clone()
     }
 
-    fn start_hotspot(&self, hotspot: &Hotspot) {
+    fn start_hotspot(&self, hotspot: &Hotspot) -> Ipv4Addr {
         let mut net = self.net.lock().unwrap();
         net.hotspot = Some(hotspot.clone());
         net.join = JoinStatus::Idle;
+        Ipv4Addr::LOCALHOST
     }
 
     fn stop_hotspot(&self) {
@@ -209,31 +245,21 @@ impl Os for FakeOs {
     fn join_wifi(&self, request: &JoinRequest) {
         let mut net = self.net.lock().unwrap();
         if net.stall {
+            net.pending = Some(request.clone());
             net.join = JoinStatus::Joining;
-            return;
+        } else {
+            net.finish_join(request);
         }
-        let found = net
-            .wifi
-            .iter()
-            .find(|w| w.network.ssid == request.ssid && (!w.hidden || request.hidden));
-        net.join = match found {
-            None => JoinStatus::Failed("that network was not found".into()),
-            Some(w) if w.network.security != request.security => {
-                JoinStatus::Failed("the network uses a different security type".into())
-            }
-            Some(w) if w.password != request.password => {
-                JoinStatus::Failed("wrong password".into())
-            }
-            Some(w) => {
-                let address = w.address.clone();
-                net.network = Network::Wifi { address: address.clone() };
-                JoinStatus::Joined { address }
-            }
-        };
     }
 
     fn join_status(&self) -> JoinStatus {
         self.net.lock().unwrap().join.clone()
+    }
+
+    fn cancel_join(&self) {
+        let mut net = self.net.lock().unwrap();
+        net.pending = None;
+        net.join = JoinStatus::Idle;
     }
 }
 
@@ -282,6 +308,23 @@ mod tests {
         os.stall_dhcp(true);
         os.join_wifi(&request("Home", None, Security::Open, false));
         assert_eq!(os.join_status(), JoinStatus::Joining);
+    }
+
+    #[test]
+    fn a_cancelled_join_does_not_finish_when_the_router_answers_late() {
+        let os = FakeOs::new("s.toml".into());
+        os.add_wifi("Home", Security::Open, None, false, "10.0.0.7");
+        os.stall_dhcp(true);
+        os.join_wifi(&request("Home", None, Security::Open, false));
+        os.cancel_join();
+        os.stall_dhcp(false);
+        assert_eq!(os.join_status(), JoinStatus::Idle);
+        assert_eq!(os.network(), Network::Wifi { address: "192.168.1.20".into() });
+
+        os.stall_dhcp(true);
+        os.join_wifi(&request("Home", None, Security::Open, false));
+        os.stall_dhcp(false);
+        assert_eq!(os.join_status(), JoinStatus::Joined { address: "10.0.0.7".into() });
     }
 
     #[test]
