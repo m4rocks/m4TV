@@ -2,10 +2,11 @@ import { useEffect, useMemo, useState } from "react";
 import { CommandError, createApi } from "./api/api";
 import { connectLive, type Link } from "./live/live";
 import type { LiveState } from "./protocol/api";
-import { stepped } from "./settings/settings";
+import { moved, setupMessage, tabAfter, tabsFor, type Tab } from "./screens";
+import { ErrorBanner, StatusBanner, buttonPrimary, input, listButton } from "./ui";
 import { joinRequest, type JoinForm, type Security } from "./wifi/wifi";
 
-const TABS = { wifi: "Wi-Fi", remote: "Remote", apps: "Apps", settings: "Settings" };
+const TABS: Record<Tab, string> = { wifi: "Wi-Fi", remote: "Remote", apps: "Apps", settings: "Settings" };
 
 const pad = "rounded-lg bg-gray-200 p-4 text-xl active:bg-gray-300 disabled:opacity-40";
 
@@ -14,12 +15,12 @@ export function Control({ token, onUnpaired }: { token: string; onUnpaired: () =
   const [live, setLive] = useState<LiveState | null>(null);
   const [link, setLink] = useState<Link>("connecting");
   const [error, setError] = useState("");
-  const [tab, setTab] = useState<"remote" | "apps" | "settings" | "wifi">("remote");
+  const [tab, setTab] = useState<Tab>("remote");
 
   // While the TV is setting itself up on its hotspot, the Wi-Fi tab comes first.
   const inSetup = !!live && live.setup.phase !== "off";
   useEffect(() => {
-    setTab((current) => (inSetup ? "wifi" : current === "wifi" ? "remote" : current));
+    setTab((current) => tabAfter(current, inSetup));
   }, [inSetup]);
 
   useEffect(() => {
@@ -67,15 +68,10 @@ export function Control({ token, onUnpaired }: { token: string; onUnpaired: () =
   return (
     <div className="flex flex-1 flex-col gap-4">
       {link !== "live" && (
-        <p role="status" className="rounded bg-yellow-100 p-3 text-yellow-900">
-          {link === "offline" ? "Can't reach the TV. Reconnecting…" : "Connecting…"}
-        </p>
+        <StatusBanner>{link === "offline" ? "Can't reach the TV. Reconnecting…" : "Connecting…"}</StatusBanner>
       )}
-      {error && (
-        <p role="alert" className="rounded bg-red-100 p-3 text-red-800">
-          {error}
-        </p>
-      )}
+      {error && <ErrorBanner>{error}</ErrorBanner>}
+      {live?.notice && <StatusBanner>{live.notice}</StatusBanner>}
 
       {tab === "remote" ? (
         <div className="space-y-4">
@@ -105,11 +101,11 @@ export function Control({ token, onUnpaired }: { token: string; onUnpaired: () =
       ) : tab === "wifi" ? (
         <Wifi live={live} onJoin={(form) => run(api.join(joinRequest(form)))} />
       ) : (
-        <Settings live={live} onChange={(key, value) => run(api.setting(key, value))} />
+        <Settings live={live} onStep={(key, direction) => run(api.step(key, direction))} />
       )}
 
       <nav className="mt-auto flex gap-2" aria-label="Sections">
-        {(inSetup ? (["wifi", "remote", "apps", "settings"] as const) : (["remote", "apps", "settings"] as const)).map((name) => (
+        {tabsFor(inSetup).map((name) => (
           <button
             key={name}
             aria-current={tab === name}
@@ -136,14 +132,14 @@ function TextBox({ onSend }: { onSend: (text: string) => Promise<void> }) {
       }}
     >
       <input
-        className="min-w-0 flex-1 rounded border p-3 text-lg"
+        className={`min-w-0 flex-1 ${input}`}
         aria-label="Text for the TV"
         placeholder="Type here"
         autoFocus
         value={text}
         onChange={(e) => setText(e.target.value)}
       />
-      <button className="rounded bg-blue-600 px-4 py-3 text-white">Send</button>
+      <button className={buttonPrimary}>Send</button>
     </form>
   );
 }
@@ -159,16 +155,12 @@ function Apps({
 }) {
   if (!live) return <p>Waiting for the TV…</p>;
   const ids = live.apps.map((app) => app.id);
-  const move = (from: number, to: number) => {
-    const next = [...ids];
-    next.splice(to, 0, ...next.splice(from, 1));
-    onOrder(next);
-  };
+  const move = (from: number, to: number) => onOrder(moved(ids, from, to));
   return (
     <ul className="space-y-2">
       {live.apps.map((app, i) => (
         <li key={app.id} className="flex items-center gap-2">
-          <button className="flex-1 rounded bg-gray-200 p-3 text-left text-lg" onClick={() => onLaunch(app.id)}>
+          <button className={`flex-1 ${listButton}`} onClick={() => onLaunch(app.id)}>
             {app.name}
           </button>
           <button className={pad} aria-label={`Move ${app.name} up`} disabled={i === 0} onClick={() => move(i, i - 1)}>
@@ -191,10 +183,10 @@ function Apps({
 /** Built from the Shell's declaration, so a new setting needs no code here. */
 function Settings({
   live,
-  onChange,
+  onStep,
 }: {
   live: LiveState | null;
-  onChange: (key: string, value: boolean | number) => void;
+  onStep: (key: string, direction: number) => void;
 }) {
   if (!live) return <p>Waiting for the TV…</p>;
   return (
@@ -207,7 +199,7 @@ function Settings({
               className={pad}
               role="switch"
               aria-checked={setting.value as boolean}
-              onClick={() => onChange(setting.key, stepped(setting, 1))}
+              onClick={() => onStep(setting.key, 1)}
             >
               {setting.value ? "On" : "Off"}
             </button>
@@ -216,7 +208,7 @@ function Settings({
               <button
                 className={pad}
                 aria-label={`${setting.label} down`}
-                onClick={() => onChange(setting.key, stepped(setting, -1))}
+                onClick={() => onStep(setting.key, -1)}
               >
                 −
               </button>
@@ -224,7 +216,7 @@ function Settings({
               <button
                 className={pad}
                 aria-label={`${setting.label} up`}
-                onClick={() => onChange(setting.key, stepped(setting, 1))}
+                onClick={() => onStep(setting.key, 1)}
               >
                 +
               </button>
@@ -242,15 +234,9 @@ function Wifi({ live, onJoin }: { live: LiveState | null; onJoin: (form: JoinFor
   if (!live) return <p>Waiting for the TV…</p>;
   const setup = live.setup;
   if (setup.phase === "off") return <p>The TV is on a network.</p>;
-  if (setup.phase === "joining") return <p role="status">The TV is joining {setup.ssid}…</p>;
-  if (setup.phase === "joined") {
-    return (
-      <p role="status">
-        The TV joined the network. Join the same Wi-Fi on this phone, then scan the new QR code on the TV
-        (or open https://{setup.address}).
-      </p>
-    );
-  }
+  const message = setupMessage(setup);
+  if (message) return <p role="status">{message}</p>;
+  if (setup.phase !== "hotspot") return null; // narrows: only the hotspot phase picks a Wi-Fi
   const start = (ssid: string, security: Security, hidden: boolean) =>
     setForm({ ssid, security, password: "", hidden });
   if (form) {
@@ -266,7 +252,7 @@ function Wifi({ live, onJoin }: { live: LiveState | null; onJoin: (form: JoinFor
         {form.hidden && (
           <>
             <input
-              className="w-full rounded border p-3 text-lg"
+              className={`w-full ${input}`}
               aria-label="Network name"
               placeholder="Network name"
               maxLength={32}
@@ -274,7 +260,7 @@ function Wifi({ live, onJoin }: { live: LiveState | null; onJoin: (form: JoinFor
               onChange={(e) => setForm({ ...form, ssid: e.target.value })}
             />
             <select
-              className="w-full rounded border p-3 text-lg"
+              className={`w-full ${input}`}
               aria-label="Security"
               value={form.security}
               onChange={(e) => setForm({ ...form, security: e.target.value as Security })}
@@ -287,7 +273,7 @@ function Wifi({ live, onJoin }: { live: LiveState | null; onJoin: (form: JoinFor
         )}
         {form.security !== "open" && (
           <input
-            className="w-full rounded border p-3 text-lg"
+            className={`w-full ${input}`}
             type="password"
             aria-label="Password"
             placeholder="Password"
@@ -308,15 +294,13 @@ function Wifi({ live, onJoin }: { live: LiveState | null; onJoin: (form: JoinFor
   return (
     <div className="space-y-2">
       {setup.reason && (
-        <p role="alert" className="rounded bg-red-100 p-3 text-red-800">
-          Could not join: {setup.reason}
-        </p>
+        <ErrorBanner>Could not join: {setup.reason}</ErrorBanner>
       )}
       <ul className="space-y-2">
         {setup.networks.map((network) => (
           <li key={network.ssid}>
             <button
-              className="w-full rounded bg-gray-200 p-3 text-left text-lg"
+              className={`w-full ${listButton}`}
               onClick={() => start(network.ssid, network.security as Security, false)}
             >
               {network.ssid}
@@ -325,7 +309,7 @@ function Wifi({ live, onJoin }: { live: LiveState | null; onJoin: (form: JoinFor
           </li>
         ))}
       </ul>
-      <button className="w-full rounded bg-gray-200 p-3 text-left text-lg" onClick={() => start("", "wpa2", true)}>
+      <button className={`w-full ${listButton}`} onClick={() => start("", "wpa2", true)}>
         Other network…
       </button>
     </div>

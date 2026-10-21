@@ -43,7 +43,7 @@ export function createApi(token: string, fetcher: typeof fetch = fetch) {
     order: (apps: string[]) => call("PUT", "/apps/order", { apps }),
     text: (text: string) => call("POST", "/text", { text }),
     join: (request: WifiJoinRequest) => call("POST", "/wifi/join", request),
-    setting: (key: string, value: boolean | number) =>
-      call("PUT", `/settings/${encodeURIComponent(key)}`, { value }),
+    step: (key: string, direction: number) =>
+      call("POST", `/settings/${encodeURIComponent(key)}/step`, { direction }),
   };
 }

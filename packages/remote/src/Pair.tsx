@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { ErrorBanner, buttonPrimary, input } from "./ui";
 import { pairByPin, pairBySecret, pairOnHotspot, parseLink, type Post } from "./pairing/pair";
 
 const post: Post = async (path, body) => {
@@ -59,12 +60,10 @@ export function Pair({ onPaired }: { onPaired: (token: string) => void }) {
           </p>
         )}
         {error && (
-          <p role="alert" className="rounded bg-red-100 p-3 text-red-800">
-            {error}
-          </p>
+          <ErrorBanner>{error}</ErrorBanner>
         )}
         <button
-          className="rounded bg-blue-600 px-4 py-3 text-white disabled:opacity-50"
+          className={buttonPrimary}
           disabled={busy}
           onClick={() => run(pairOnHotspot(post, NAME))}
         >
@@ -96,7 +95,7 @@ export function Pair({ onPaired }: { onPaired: (token: string) => void }) {
         }}
       >
         <input
-          className="min-w-0 flex-1 rounded border p-3 text-lg"
+          className={`min-w-0 flex-1 ${input}`}
           inputMode="numeric"
           autoComplete="off"
           aria-label="PIN"
@@ -104,14 +103,12 @@ export function Pair({ onPaired }: { onPaired: (token: string) => void }) {
           value={pin}
           onChange={(e) => setPin(e.target.value)}
         />
-        <button className="rounded bg-blue-600 px-4 py-3 text-white disabled:opacity-50" disabled={busy || !pin.trim()}>
+        <button className={buttonPrimary} disabled={busy || !pin.trim()}>
           Pair
         </button>
       </form>
       {error && (
-        <p role="alert" className="rounded bg-red-100 p-3 text-red-800">
-          {error}
-        </p>
+        <ErrorBanner>{error}</ErrorBanner>
       )}
     </section>
   );

@@ -43,12 +43,12 @@ test("a revoked token is reported as such", async () => {
   await expect(createApi("t", fetch).key("Enter")).rejects.toMatchObject({ unpaired: true });
 });
 
-test("a setting is a PUT of its value to its own path", async () => {
+test("a setting is moved by a step, not set to a value the phone worked out", async () => {
   const { fetch, calls } = fetchStub(204);
-  await createApi("t", fetch).setting("volume", 70);
-  expect(calls[0].init.method).toBe("PUT");
-  expect(calls[0].url).toBe("/api/settings/volume");
-  expect(calls[0].init.body).toBe('{"value":70}');
+  await createApi("t", fetch).step("volume", 1);
+  expect(calls[0].init.method).toBe("POST");
+  expect(calls[0].url).toBe("/api/settings/volume/step");
+  expect(calls[0].init.body).toBe('{"direction":1}');
 });
 
 test("a TV that never answers is reported unreachable after a while", async () => {
