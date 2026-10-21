@@ -22,6 +22,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
             libx11-xcb-dev libxcb1-dev libfontconfig-dev libvulkan-dev libasound2-dev
+      # The Shell's build runs npm for the Remote web app (ADR 0004).
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: packages/remote/package-lock.json
       - uses: Swatinem/rust-cache@v2
       - uses: extractions/setup-just@v2
       - run: just ci

@@ -269,6 +269,17 @@ impl Api {
         self.call(reqwest::Method::GET, path, token, None).await
     }
 
+    /// Fetches a page: status, content type and body.
+    async fn page(&self, path: &str) -> (u16, String, String) {
+        let response = self.client.get(self.url(path)).send().await.unwrap();
+        let status = response.status().as_u16();
+        let kind = response
+            .headers()
+            .get("content-type")
+            .map_or(String::new(), |v| v.to_str().unwrap().to_string());
+        (status, kind, response.text().await.unwrap())
+    }
+
     /// Presses a Remote button.
     async fn key(&self, token: &str, code: &str) -> u16 {
         self.post("/api/key", Some(token), json!({ "code": code })).await.0
@@ -328,20 +339,258 @@ fn a_client_pairs_by_pin_and_then_calls_the_api() {
     assert_eq!(state["volume"], 50);
 }
 
+/// A field of the QR link's fragment.
+fn fragment_field(payload: &str, name: &str) -> String {
+    let fragment = payload.split_once('#').unwrap().1;
+    fragment.split('&').find_map(|f| f.strip_prefix(&format!("{name}="))).unwrap().to_string()
+}
+
+fn unhex(text: &str) -> Vec<u8> {
+    (0..text.len()).step_by(2).map(|i| u8::from_str_radix(&text[i..i + 2], 16).unwrap()).collect()
+}
+
+fn random_hex() -> String {
+    let mut bytes = [0u8; 16];
+    getrandom::fill(&mut bytes).unwrap();
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// What the Remote page computes with `@noble/hashes`: HMAC-SHA256 over `role:challenge:nonce`,
+/// keyed by the QR secret.
+fn mac(secret: &str, role: &str, challenge: &str, nonce: &str) -> String {
+    use hmac::{Hmac, KeyInit, Mac};
+    let mut mac = Hmac::<Sha256>::new_from_slice(&unhex(secret)).unwrap();
+    mac.update(format!("{role}:{challenge}:{nonce}").as_bytes());
+    mac.finalize().into_bytes().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Pairs the way the Remote page does after a scan: asks for a challenge, proves it knows the
+/// QR `secret`, checks the TV proves it too, and works out its token (which never travels).
+/// `post` is the wire to the TV, so a test can put something in the middle.
+async fn pair_by_secret(
+    post: impl AsyncFn(&str, Value) -> (u16, Value),
+    secret: &str,
+    name: &str,
+) -> Result<String, String> {
+    let (status, body) = post("/api/pair/challenge", json!({})).await;
+    if status != 200 {
+        return Err(format!("the TV refused a challenge: {status}"));
+    }
+    let challenge = body["challenge"].as_str().unwrap().to_string();
+    let nonce = random_hex();
+    let request = json!({
+        "challenge": challenge,
+        "nonce": nonce,
+        "proof": mac(secret, "phone", &challenge, &nonce),
+        "name": name,
+    });
+    let (status, body) = post("/api/pair/prove", request).await;
+    if status != 200 {
+        return Err(format!("the TV refused the proof: {status}"));
+    }
+    if body["proof"] != mac(secret, "tv", &challenge, &nonce) {
+        return Err("the TV did not prove it knows the secret".into());
+    }
+    Ok(mac(secret, "token", &challenge, &nonce))
+}
+
 #[test]
-fn a_client_pairs_by_the_qr_payload() {
+fn a_client_pairs_by_the_qr_secret_and_not_the_pin() {
+    let mut rig = Rig::new();
+    let api = rig.api();
+    let (pin, payload) = rig.pairing();
+    assert!(!payload.contains(&pin), "the QR link must not carry the PIN");
+    assert_eq!(fragment_field(&payload, "fp"), rig.fingerprint);
+
+    let secret = fragment_field(&payload, "secret");
+    let token = rig
+        .drive(pair_by_secret(async |path, body| api.post(path, None, body).await, &secret, "QR"))
+        .unwrap();
+    assert_eq!(rig.drive(api.get("/api/state", Some(&token))).0, 200);
+    assert!(rig.shell.settings_rows().iter().any(|r| r.label() == "QR"));
+}
+
+#[test]
+fn a_wrong_secret_is_refused_and_too_many_replace_the_secret_and_pause_pairing() {
     let mut rig = Rig::new();
     let api = rig.api();
     let (_, payload) = rig.pairing();
-    // The payload is a link whose fragment carries the PIN and the certificate fingerprint.
-    let fragment = payload.split_once('#').unwrap().1;
-    let field = |name: &str| {
-        fragment.split('&').find_map(|f| f.strip_prefix(&format!("{name}="))).unwrap().to_string()
-    };
-    assert_eq!(field("fp"), rig.fingerprint);
-    let (status, body) =
-        rig.drive(api.post("/api/pair", None, json!({"pin": field("pin"), "name": "QR"})));
-    assert_eq!((status, body["token"].is_string()), (200, true));
+    let secret = fragment_field(&payload, "secret");
+    let wrong = "00".repeat(16);
+    for _ in 0..5 {
+        let result = rig.drive(pair_by_secret(
+            async |path, body| api.post(path, None, body).await,
+            &wrong,
+            "x",
+        ));
+        assert!(result.is_err());
+    }
+    rig.shell.tick(Duration::ZERO);
+    let (_, new_payload) = rig.pairing();
+    assert_ne!(fragment_field(&new_payload, "secret"), secret);
+    // The secret that was on screen is dead, and pairing is paused for the new one too.
+    for secret in [secret, fragment_field(&new_payload, "secret")] {
+        let result = rig.drive(pair_by_secret(
+            async |path, body| api.post(path, None, body).await,
+            &secret,
+            "x",
+        ));
+        assert!(result.is_err(), "pairing is paused after too many wrong tries");
+    }
+}
+
+#[test]
+fn wrong_pins_also_kill_the_secret() {
+    let mut rig = Rig::new();
+    let api = rig.api();
+    let (pin, payload) = rig.pairing();
+    let secret = fragment_field(&payload, "secret");
+    let wrong = if pin == "000000" { "111111" } else { "000000" };
+    for _ in 0..5 {
+        rig.drive(api.post("/api/pair", None, json!({"pin": wrong, "name": "x"})));
+    }
+    let result = rig.drive(pair_by_secret(
+        async |path, body| api.post(path, None, body).await,
+        &secret,
+        "x",
+    ));
+    assert!(result.is_err());
+}
+
+#[test]
+fn a_replayed_proof_or_a_reused_secret_is_refused() {
+    let mut rig = Rig::new();
+    let api = rig.api();
+    let (_, payload) = rig.pairing();
+    let secret = fragment_field(&payload, "secret");
+
+    // Record the phone's messages while it pairs.
+    let sent = Mutex::new(Vec::new());
+    let token = rig
+        .drive(pair_by_secret(
+            async |path, body| {
+                sent.lock().unwrap().push((path.to_string(), body.clone()));
+                api.post(path, None, body).await
+            },
+            &secret,
+            "Pixel",
+        ))
+        .unwrap();
+    assert_eq!(rig.drive(api.get("/api/state", Some(&token))).0, 200);
+
+    for (path, body) in sent.into_inner().unwrap() {
+        if path.ends_with("/prove") {
+            let replay = rig.drive(api.post(&path, None, body)).0;
+            assert_eq!(replay, 403, "a proof works once");
+        }
+    }
+    // The secret died with the pairing, even for a client that knows it.
+    let again = rig.drive(pair_by_secret(
+        async |path, body| api.post(path, None, body).await,
+        &secret,
+        "Again",
+    ));
+    assert!(again.is_err());
+}
+
+#[test]
+fn proofs_for_challenges_the_tv_never_gave_do_not_burn_the_tries() {
+    let mut rig = Rig::new();
+    let api = rig.api();
+    let (_, payload) = rig.pairing();
+    let secret = fragment_field(&payload, "secret");
+    for _ in 0..10 {
+        let bogus = json!({"challenge": random_hex(), "nonce": "00", "proof": random_hex()});
+        assert_eq!(rig.drive(api.post("/api/pair/prove", None, bogus)).0, 403);
+    }
+    // Nobody was locked out and the secret is the one on screen.
+    let paired = rig.drive(pair_by_secret(
+        async |path, body| api.post(path, None, body).await,
+        &secret,
+        "Pixel",
+    ));
+    assert!(paired.is_ok());
+}
+
+#[test]
+fn a_client_catches_a_tv_that_does_not_know_the_secret() {
+    let mut rig = Rig::new();
+    let (_, payload) = rig.pairing();
+    let secret = fragment_field(&payload, "secret");
+    // An impostor answers the challenge and accepts any proof, but cannot make the TV's proof.
+    let result = rig.drive(pair_by_secret(
+        async |path, _| {
+            if path.ends_with("/challenge") {
+                (200, json!({ "challenge": random_hex() }))
+            } else {
+                (200, json!({ "proof": random_hex() }))
+            }
+        },
+        &secret,
+        "x",
+    ));
+    assert_eq!(result.unwrap_err(), "the TV did not prove it knows the secret");
+}
+
+#[test]
+fn a_proxy_that_relays_the_pairing_without_the_secret_cannot_use_it() {
+    let mut rig = Rig::new();
+    let api = rig.api();
+    let (pin, payload) = rig.pairing();
+    let secret = fragment_field(&payload, "secret");
+
+    // The phone pairs through a proxy that sees every message in both directions.
+    let seen = Mutex::new(Vec::new());
+    let token = rig
+        .drive(pair_by_secret(
+            async |path, body| {
+                let (status, reply) = api.post(path, None, body.clone()).await;
+                seen.lock().unwrap().extend([body, reply.clone()]);
+                (status, reply)
+            },
+            &secret,
+            "Pixel",
+        ))
+        .unwrap();
+
+    // Nothing it saw is a token: the token is worked out from the secret and never sent.
+    let strings: Vec<String> = seen
+        .into_inner()
+        .unwrap()
+        .iter()
+        .flat_map(|message| message.as_object().unwrap().values().cloned().collect::<Vec<_>>())
+        .filter_map(|value| value.as_str().map(str::to_string))
+        .collect();
+    assert!(!strings.contains(&token));
+    for guess in strings {
+        assert_eq!(rig.drive(api.get("/api/state", Some(&guess))).0, 401);
+    }
+    // And the PIN that was on screen pairs nothing either.
+    let late = rig.drive(api.post("/api/pair", None, json!({"pin": pin, "name": "Proxy"})));
+    assert_eq!(late.0, 403);
+}
+
+#[test]
+fn the_remote_web_app_is_served_with_a_landing_page_that_needs_no_javascript() {
+    let mut rig = Rig::new();
+    let api = rig.api();
+    let (status, kind, page) = rig.drive(api.page("/"));
+    assert_eq!(status, 200);
+    assert!(kind.starts_with("text/html"), "{kind}");
+    // The page itself says where to open, without a script: the address it was fetched from.
+    assert!(page.contains(&format!("https://{}/", rig.addr)), "{page}");
+
+    // Every file the page loads is served, with the type a browser needs to run it.
+    let files: Vec<&str> =
+        page.split(['"', '\'']).filter(|part| part.starts_with("/assets/")).collect();
+    for file in files {
+        let (status, kind, _) = rig.drive(api.page(file));
+        let wanted = if file.ends_with(".js") { "text/javascript" } else { "text/css" };
+        assert_eq!((status, kind.as_str()), (200, wanted), "{file}");
+    }
+    assert_eq!(rig.drive(api.page("/nothing-here")).0, 404);
+    let post = rig.drive(api.post("/", None, json!({}))).0;
+    assert_eq!(post, 405, "the web app is read-only");
 }
 
 #[test]

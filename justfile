@@ -10,7 +10,8 @@ default:
 # wrapper, which needs cmake, ninja and MSVC: on Windows this opens the Visual Studio developer
 # environment unless you are already in one.
 
-# Run the Shell with the Engine (the Dev host on Windows).
+# Run the Shell with the Engine (the Dev host on Windows). Building it builds the Remote web app
+# first (crates/shell/build.rs, which needs Node; set M4TV_SKIP_WEB=1 to go without).
 [windows]
 run:
     if (-not $env:VSCMD_VER) { \
@@ -28,9 +29,10 @@ run:
 build:
     cargo build --workspace --all-targets --locked
 
-# Run the tests.
+# Run the tests: the Rust ones, then the Remote web app's (installed by the Rust build).
 test:
     cargo test --workspace --locked
+    npm test --prefix packages/remote
 
 # Check formatting and lints (needs the rustfmt and clippy components).
 lint:
