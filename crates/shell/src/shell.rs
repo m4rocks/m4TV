@@ -137,7 +137,7 @@ pub enum Row {
     Setting(&'static SettingDef),
     /// Shows the Pairing Overlay.
     Pair,
-    /// Brings up the Setup hotspot.
+    /// Starts the Setup hotspot, or stops one started here.
     Hotspot,
     /// A paired phone; Enter unpairs it.
     Phone(Phone),
@@ -161,7 +161,7 @@ impl Row {
     pub fn hint(&self) -> &'static str {
         match self {
             Row::Phone(_) => "Enter to unpair",
-            Row::Hotspot => "Enter to start",
+            Row::Hotspot => "Enter to start or stop",
             _ => "",
         }
     }
@@ -336,15 +336,18 @@ impl Shell {
 
     /// Keeps the Pairing Overlay, the phone count and the Remote's view of the Shell current.
     fn sync_remote(&mut self) {
-        let Some(remote) = &self.remote else { return };
-        let phones = remote.pairings().phones().len();
+        let Some(phones) = self.remote.as_ref().map(|remote| remote.pairings().phones().len())
+        else {
+            return;
+        };
         if phones > self.phones_seen {
             self.pairing_requested = false;
             if matches!(self.setup, Setup::Joined { .. }) {
-                self.setup = Setup::Off;
+                self.end_handover();
             }
         }
         self.phones_seen = phones;
+        let Some(remote) = &self.remote else { return };
         if let Some(overlay) = setup_overlay(&self.setup, remote) {
             self.overlay = Some((overlay, Duration::MAX));
             remote.publish(self.live_state());

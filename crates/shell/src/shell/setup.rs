@@ -55,6 +55,9 @@ pub(super) fn setup_overlay(setup: &Setup, remote: &Remote) -> Option<Overlay> {
     };
     match setup {
         Setup::Off => None,
+        // Waiting for a Wi-Fi with a phone already on the Remote: the panel has done its job, as
+        // the Pairing one does. A failure or a join in progress still shows.
+        Setup::Hotspot { reason: None, .. } if remote.connections() > 0 => None,
         Setup::Hotspot { session, reason, .. } => {
             Some(hotspot_overlay(session, reason.clone().unwrap_or_default()))
         }
@@ -151,6 +154,10 @@ impl Shell {
                 match self.os.join_status() {
                     JoinStatus::Joined { address } => {
                         self.setup = Setup::Joined { address, hotspot_left: Some(JOINED_GRACE) };
+                        // The handover ends when a phone pairs at the new address, not for the
+                        // one that paired on the hotspot a moment ago.
+                        self.phones_seen =
+                            self.remote.as_ref().map_or(0, |r| r.pairings().phones().len());
                     }
                     JoinStatus::Failed(reason) => self.hotspot_again(reason),
                     _ if timed_out => self.hotspot_again(format!(
@@ -226,30 +233,39 @@ impl Shell {
         self.setup = joining;
     }
 
-    /// Settings asked for the hotspot. A TV on Ethernet has no use for one.
+    /// Settings starts the hotspot, and stops one it started. A TV on Ethernet has no use for
+    /// one, and one that came up because there is no network goes when there is one.
     pub(super) fn ask_for_hotspot(&mut self) {
         if self.os.network() == Network::Ethernet {
             self.notice = Some("Ethernet is connected, so there is no Setup hotspot".into());
-        } else if matches!(self.setup, Setup::Off) {
-            self.start_hotspot(true);
+            return;
+        }
+        match self.setup {
+            Setup::Off => self.start_hotspot(true),
+            Setup::Hotspot { session: Session { on_demand: true, .. }, .. } => self.stop_hotspot(),
+            _ => {}
         }
     }
 
-    /// Back dismisses the handover, or an on-demand hotspot. Returns whether it did.
-    pub(super) fn put_setup_away(&mut self) -> bool {
-        match self.setup {
-            Setup::Joined { .. } => {
-                self.setup = Setup::Off;
-                if let Some(remote) = &self.remote {
-                    remote.pairings().cancel();
-                }
-                true
-            }
-            Setup::Hotspot { session: Session { on_demand: true, .. }, .. } => {
-                self.stop_hotspot();
-                true
-            }
-            _ => false,
+    /// Ends the handover: a phone paired at the new address, or Back. The hotspot goes too, if the
+    /// grace period for the phone that picked the Wi-Fi is still running.
+    pub(super) fn end_handover(&mut self) {
+        if matches!(self.setup, Setup::Joined { hotspot_left: Some(_), .. }) {
+            self.drop_hotspot();
         }
+        self.setup = Setup::Off;
+        if let Some(remote) = &self.remote {
+            remote.pairings().cancel();
+        }
+    }
+
+    /// Back dismisses the handover. It leaves the hotspot alone: a phone may be using it.
+    /// Returns whether it did anything.
+    pub(super) fn put_setup_away(&mut self) -> bool {
+        let handover = matches!(self.setup, Setup::Joined { .. });
+        if handover {
+            self.end_handover();
+        }
+        handover
     }
 }

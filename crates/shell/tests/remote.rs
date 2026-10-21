@@ -327,11 +327,14 @@ impl Api {
 
     /// Opens the live-state WebSocket.
     async fn connect(&self, token: &str) -> Result<Ws, tokio_tungstenite::tungstenite::Error> {
-        let url = format!("wss://{}/api/ws?token={token}", self.addr);
-        let connector = tokio_tungstenite::Connector::Rustls(self.tls.clone());
+        let (url, connector) = if self.scheme == "http" {
+            (format!("ws://{}/api/ws?token={token}", self.addr), None)
+        } else {
+            let connector = tokio_tungstenite::Connector::Rustls(self.tls.clone());
+            (format!("wss://{}/api/ws?token={token}", self.addr), Some(connector))
+        };
         let (ws, _) =
-            tokio_tungstenite::connect_async_tls_with_config(url, None, false, Some(connector))
-                .await?;
+            tokio_tungstenite::connect_async_tls_with_config(url, None, false, connector).await?;
         Ok(ws)
     }
 }
@@ -1201,9 +1204,10 @@ fn settings_starts_the_hotspot_on_demand_except_on_ethernet() {
     assert!(rig.os.hotspot().is_some());
     hotspot_overlay(&rig);
 
-    // Back puts it away, as the network is fine.
-    rig.shell.press(Key::Back);
+    // Enter on the same row stops it again, as the network is fine.
+    rig.shell.press(Key::Enter);
     assert_eq!(rig.os.hotspot(), None);
+    rig.pairing(); // the ordinary Pairing Overlay is back, the hotspot's is gone
 
     let mut rig = Rig::in_dir_with(temp_dir(), |os| os.set_network(Network::Ethernet));
     open_settings_row(&mut rig, row);
@@ -1315,4 +1319,69 @@ fn a_setting_the_shell_could_not_save_is_reported_to_the_phone() {
     rig.drive(state_where(&mut ws, |s| {
         s["notice"].as_str().is_some_and(|n| n.contains("Could not save settings"))
     }));
+}
+
+#[test]
+fn a_phone_with_the_remote_open_clears_the_hotspot_panel_and_back_leaves_it_connected() {
+    let mut rig = Rig::new();
+    let row = rig.shell.settings_rows().iter().position(|r| r.label() == "Setup hotspot").unwrap();
+    open_settings_row(&mut rig, row);
+    rig.shell.press(Key::Enter);
+    hotspot_overlay(&rig);
+
+    // The phone pairs on the hotspot and opens the Remote there.
+    let token = pair_on_hotspot(&mut rig);
+    let http = rig.hotspot_api();
+    let mut ws = rig.drive(http.connect(&token)).unwrap();
+    rig.drive(state_where(&mut ws, |_| true));
+    rig.shell.tick(Duration::ZERO);
+    assert!(rig.shell.overlay().is_none(), "{:?}", rig.shell.overlay());
+
+    // Back is the TV's own business: the phone stays connected and the hotspot stays up.
+    rig.shell.press(Key::Back);
+    assert!(rig.os.hotspot().is_some());
+    assert_eq!(rig.drive(http.key(&token, "ArrowRight")), 204);
+    rig.drive(state_where(&mut ws, |s| s["setup"]["phase"] == "hotspot"));
+
+    // The phone leaving brings the panel back for the next one.
+    drop(ws);
+    rig.drive(async { tokio::time::sleep(Duration::from_millis(50)).await });
+    rig.shell.tick(Duration::ZERO);
+    hotspot_overlay(&rig);
+}
+
+#[test]
+fn a_phone_that_paired_just_before_the_join_does_not_end_the_handover() {
+    let mut rig = Rig::offline();
+    // No Shell turns between the phone pairing and the TV joining.
+    let http = rig.hotspot_api();
+    let (status, body) =
+        rig.runtime.block_on(http.post("/api/pair/hotspot", None, json!({"name": "Pixel"})));
+    assert_eq!(status, 200);
+    let token = body["token"].as_str().unwrap().to_string();
+    let join = json!({"ssid": "Home", "password": "hunter22", "security": "wpa2", "hidden": false});
+    assert_eq!(rig.runtime.block_on(http.post("/api/wifi/join", Some(&token), join)).0, 204);
+    rig.shell.tick(Duration::ZERO);
+    assert!(
+        matches!(rig.shell.overlay(), Some(Overlay::Joined { .. })),
+        "{:?}",
+        rig.shell.overlay()
+    );
+    assert!(rig.os.hotspot().is_some(), "the phone is still being told");
+
+    // Ending the handover early (a phone paired at the new address) takes the hotspot with it.
+    let api = rig.api();
+    let Some(Overlay::Joined { payload, .. }) = rig.shell.overlay().cloned() else {
+        unreachable!()
+    };
+    let secret = fragment_field(&payload, "secret");
+    rig.drive(pair_by_secret(
+        async |path, body| api.post(path, None, body).await,
+        &secret,
+        "Second",
+    ))
+    .unwrap();
+    rig.shell.tick(Duration::ZERO);
+    assert_eq!(rig.os.hotspot(), None);
+    assert!(!rig.drive(http.reachable("/api/hotspot")));
 }
