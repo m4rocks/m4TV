@@ -24,6 +24,18 @@ _Avoid_: Channel, site, service
 The web browser technology that runs an App's pages and plays its protected video.
 _Avoid_: Browser, renderer, webview
 
+**Hero**:
+The area of Home above the Tiles, showing the clock and a one-line status.
+_Avoid_: Banner, header, dashboard
+
+**Theme**:
+The Shell's Dark or Light appearance, a Setting. The Remote follows the phone's own preference instead.
+_Avoid_: Skin, mode
+
+**Safe area**:
+The margin inside the screen edge that holds all Shell text and Tiles, so an overscanning TV does not clip them.
+_Avoid_: Overscan margin, padding
+
 **Overlay**:
 Shell interface drawn on top of an App while the App keeps playing, such as a volume indicator or a pairing PIN.
 _Avoid_: Popup, HUD, toast
