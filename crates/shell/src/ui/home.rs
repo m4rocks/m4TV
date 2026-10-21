@@ -1,10 +1,10 @@
 //! Home: the Hero (clock and status) over a row of Tiles, the focused one grown and named.
 
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use gpui::{
-    Animation, AnimationExt, BoxShadow, Div, ObjectFit, Pixels, div, ease_out_quint, hsla, img,
-    point, prelude::*, px,
+    Animation, AnimationExt, Bounds, BoxShadow, Div, ObjectFit, Pixels, RenderImage, Size, div,
+    ease_out_quint, hsla, img, point, prelude::*, px, size,
 };
 use m4tv_shell::{
     shell::Shell,
@@ -134,4 +134,62 @@ fn settings_glyph(p: Palette) -> Div {
     div().flex().flex_col().gap(px(tokens::SPACE_2)).children((0..3).map(|_| {
         div().w(px(56.)).h(px(6.)).rounded(px(tokens::RADIUS_SMALL)).bg(color(p.text))
     }))
+}
+
+/// Where the Tile at `index` is on Home, for the launch transition to start from. It follows the
+/// layout above by arithmetic, not by measuring.
+// shortcut: the Hero's height is a constant, so a change to its text sizes needs it updated here.
+pub fn tile_bounds(
+    shell: &Shell,
+    viewport: Size<Pixels>,
+    margin: Pixels,
+    index: usize,
+) -> Bounds<Pixels> {
+    // The launching Tile is the focused one, which is bigger unless motion is reduced.
+    let grown = if shell.reduce_motion() { 1. } else { 1. + GROWTH };
+    let (tile_w, tile_h) = (TILE_W * grown, TILE_H * grown);
+    let (width, height, margin) = (f32::from(viewport.width), f32::from(viewport.height), f32::from(margin));
+    let slot = TILE_W * (1. + GROWTH);
+    let count = shell.apps().len() + 1;
+    let row = count as f32 * slot + (count - 1) as f32 * tokens::SPACE_4;
+    let hero = if shell.clock_text().is_some() { 68. } else { 28. };
+    let column = TILE_H * (1. + GROWTH) + tokens::SPACE_8;
+    let centre_x = (width - row) / 2. + index as f32 * (slot + tokens::SPACE_4) + slot / 2.;
+    let centre_y = margin + hero + (height - 2. * margin - hero - column) / 2. + TILE_H * (1. + GROWTH) / 2.;
+    Bounds::new(
+        point(px(centre_x - tile_w / 2.), px(centre_y - tile_h / 2.)),
+        size(px(tile_w), px(tile_h)),
+    )
+}
+
+/// The Tile on its way to filling the screen, holding the App's logo, or the name without one.
+pub fn cover(
+    grow: f32,
+    fade: f32,
+    from: Bounds<Pixels>,
+    viewport: Size<Pixels>,
+    logo: Option<Arc<RenderImage>>,
+    name: &str,
+    p: Palette,
+) -> Div {
+    let lerp = |a: Pixels, b: f32| px(f32::from(a) + (b - f32::from(a)) * grow);
+    div()
+        .absolute()
+        .left(lerp(from.origin.x, 0.))
+        .top(lerp(from.origin.y, 0.))
+        .w(lerp(from.size.width, f32::from(viewport.width)))
+        .h(lerp(from.size.height, f32::from(viewport.height)))
+        .rounded(px(tokens::RADIUS_LARGE * (1. - grow)))
+        .opacity(fade)
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(color(p.surface))
+        .text_size(px(tokens::TEXT_XL))
+        .text_color(color(p.text))
+        .child(match logo {
+            Some(logo) => div()
+                .child(img(logo).w(px(TILE_W * 0.6)).h(px(TILE_H * 0.5)).object_fit(ObjectFit::Contain)),
+            None => div().child(name.to_string()),
+        })
 }
