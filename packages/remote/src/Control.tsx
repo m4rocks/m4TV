@@ -3,6 +3,7 @@ import { CommandError, createApi } from "./api/api";
 import { connectLive, type Link } from "./live/live";
 import type { LiveState } from "./protocol/api";
 import { stepped } from "./settings/settings";
+import { joinRequest, type JoinForm, type Security } from "./wifi/wifi";
 
 const pad = "rounded-lg bg-gray-200 p-4 text-xl active:bg-gray-300 disabled:opacity-40";
 
@@ -11,7 +12,13 @@ export function Control({ token, onUnpaired }: { token: string; onUnpaired: () =
   const [live, setLive] = useState<LiveState | null>(null);
   const [link, setLink] = useState<Link>("connecting");
   const [error, setError] = useState("");
-  const [tab, setTab] = useState<"remote" | "apps" | "settings">("remote");
+  const [tab, setTab] = useState<"remote" | "apps" | "settings" | "wifi">("remote");
+
+  // While the TV is setting itself up on its hotspot, the Wi-Fi tab comes first.
+  const inSetup = !!live && live.setup.phase !== "off";
+  useEffect(() => {
+    setTab((current) => (inSetup ? "wifi" : current === "wifi" ? "remote" : current));
+  }, [inSetup]);
 
   useEffect(() => {
     const scheme = location.protocol === "https:" ? "wss" : "ws";
@@ -27,6 +34,15 @@ export function Control({ token, onUnpaired }: { token: string; onUnpaired: () =
       connection.close();
     };
   }, [token]);
+
+  // A revoked phone (or a replaced certificate) is refused at the WebSocket, which looks like an
+  // unreachable TV: ask the API, which says 401, and go back to pairing.
+  useEffect(() => {
+    if (link !== "offline") return;
+    fetch("/api/state", { headers: { Authorization: `Bearer ${token}` } })
+      .then((response) => response.status === 401 && onUnpaired())
+      .catch(() => {});
+  }, [link]);
 
   async function run(command: Promise<void>) {
     try {
@@ -82,12 +98,14 @@ export function Control({ token, onUnpaired }: { token: string; onUnpaired: () =
         </div>
       ) : tab === "apps" ? (
         <Apps live={live} onLaunch={(id) => run(api.launch(id))} onOrder={(ids) => run(api.order(ids))} />
+      ) : tab === "wifi" ? (
+        <Wifi live={live} onJoin={(form) => run(api.join(joinRequest(form)))} />
       ) : (
         <Settings live={live} onChange={(key, value) => run(api.setting(key, value))} />
       )}
 
       <nav className="mt-auto flex gap-2" aria-label="Sections">
-        {(["remote", "apps", "settings"] as const).map((name) => (
+        {(inSetup ? (["wifi", "remote", "apps", "settings"] as const) : (["remote", "apps", "settings"] as const)).map((name) => (
           <button
             key={name}
             aria-current={tab === name}
@@ -211,5 +229,101 @@ function Settings({
         </li>
       ))}
     </ul>
+  );
+}
+
+/** Picking a Wi-Fi for the TV while it sets itself up on its hotspot. */
+function Wifi({ live, onJoin }: { live: LiveState | null; onJoin: (form: JoinForm) => void }) {
+  const [form, setForm] = useState<JoinForm | null>(null);
+  if (!live) return <p>Waiting for the TV…</p>;
+  const setup = live.setup;
+  if (setup.phase === "off") return <p>The TV is on a network.</p>;
+  if (setup.phase === "joining") return <p role="status">The TV is joining {setup.ssid}…</p>;
+  if (setup.phase === "joined") {
+    return (
+      <p role="status">
+        The TV joined the network. Join the same Wi-Fi on this phone, then scan the new QR code on the TV
+        (or open https://{setup.address}).
+      </p>
+    );
+  }
+  const start = (ssid: string, security: Security, hidden: boolean) =>
+    setForm({ ssid, security, password: "", hidden });
+  if (form) {
+    return (
+      <form
+        className="space-y-3"
+        onSubmit={(e) => {
+          e.preventDefault();
+          onJoin(form);
+        }}
+      >
+        <h2 className="text-lg font-bold">{form.hidden ? "Hidden network" : form.ssid}</h2>
+        {form.hidden && (
+          <>
+            <input
+              className="w-full rounded border p-3 text-lg"
+              aria-label="Network name"
+              placeholder="Network name"
+              maxLength={32}
+              value={form.ssid}
+              onChange={(e) => setForm({ ...form, ssid: e.target.value })}
+            />
+            <select
+              className="w-full rounded border p-3 text-lg"
+              aria-label="Security"
+              value={form.security}
+              onChange={(e) => setForm({ ...form, security: e.target.value as Security })}
+            >
+              <option value="wpa2">WPA2</option>
+              <option value="wpa3">WPA3</option>
+              <option value="open">Open</option>
+            </select>
+          </>
+        )}
+        {form.security !== "open" && (
+          <input
+            className="w-full rounded border p-3 text-lg"
+            type="password"
+            aria-label="Password"
+            placeholder="Password"
+            autoComplete="off"
+            value={form.password}
+            onChange={(e) => setForm({ ...form, password: e.target.value })}
+          />
+        )}
+        <div className="flex gap-2">
+          <button type="button" className={pad} onClick={() => setForm(null)}>
+            Back
+          </button>
+          <button className="flex-1 rounded bg-blue-600 p-4 text-xl text-white">Join</button>
+        </div>
+      </form>
+    );
+  }
+  return (
+    <div className="space-y-2">
+      {setup.reason && (
+        <p role="alert" className="rounded bg-red-100 p-3 text-red-800">
+          Could not join: {setup.reason}
+        </p>
+      )}
+      <ul className="space-y-2">
+        {setup.networks.map((network) => (
+          <li key={network.ssid}>
+            <button
+              className="w-full rounded bg-gray-200 p-3 text-left text-lg"
+              onClick={() => start(network.ssid, network.security as Security, false)}
+            >
+              {network.ssid}
+              {network.security !== "open" && " 🔒"}
+            </button>
+          </li>
+        ))}
+      </ul>
+      <button className="w-full rounded bg-gray-200 p-3 text-left text-lg" onClick={() => start("", "wpa2", true)}>
+        Other network…
+      </button>
+    </div>
   );
 }

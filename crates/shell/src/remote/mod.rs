@@ -15,6 +15,7 @@ use std::{
 };
 
 use axum_server::tls_rustls::RustlsConfig;
+use m4tv_os::JoinRequest;
 use m4tv_settings::Value;
 use serde::Serialize;
 use tokio::sync::{mpsc, watch};
@@ -45,6 +46,34 @@ pub struct LiveState {
     pub editable: bool,
     /// Every declared setting, in the declaration's order: the Remote builds its screens from this.
     pub settings: Vec<SettingState>,
+    /// Whether the TV is setting itself up on the Setup hotspot, and how that is going.
+    pub setup: SetupView,
+}
+
+/// The Setup hotspot flow, as a phone on the hotspot sees it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, TS)]
+#[serde(tag = "phase", rename_all = "lowercase")]
+pub enum SetupView {
+    #[default]
+    Off,
+    /// Waiting for a phone to pick a Wi-Fi. `reason` says why the last join failed.
+    Hotspot {
+        reason: Option<String>,
+        networks: Vec<WifiView>,
+    },
+    Joining {
+        ssid: String,
+    },
+    Joined {
+        address: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+pub struct WifiView {
+    pub ssid: String,
+    /// "open", "wpa2" or "wpa3".
+    pub security: &'static str,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
@@ -84,6 +113,7 @@ pub enum Command {
     Order(Vec<String>),
     Text(String),
     Setting(String, Value),
+    Join(JoinRequest),
 }
 
 /// The running Remote server, held by the Shell. Dropping it stops the server.
@@ -97,6 +127,16 @@ pub struct Remote {
     state: Arc<watch::Sender<LiveState>>,
     connections: Arc<AtomicUsize>,
     mdns: Option<mdns_sd::ServiceDaemon>,
+    shared: server::Shared,
+    lan: bool,
+    hotspot_port: u16,
+    hotspot: Option<HotspotListener>,
+}
+
+/// The plain-HTTP listener that exists only while the Setup hotspot is up.
+struct HotspotListener {
+    stop: tokio::sync::oneshot::Sender<()>,
+    stopped: std::sync::mpsc::Receiver<()>,
 }
 
 impl Remote {
@@ -123,12 +163,14 @@ impl Remote {
         let (commands_tx, commands) = mpsc::unbounded_channel();
         let state = Arc::new(watch::channel(LiveState::default()).0);
         let connections = Arc::new(AtomicUsize::new(0));
-        let app = server::router(server::Shared {
+        let shared = server::Shared {
             pairings: pairings.clone(),
             commands: commands_tx,
             state: state.clone(),
             connections: connections.clone(),
-        });
+            fingerprint: identity.fingerprint.clone().into(),
+        };
+        let app = server::router(shared.clone());
         {
             let _enter = runtime.enter();
             let server = axum_server::from_tcp_rustls(listener, config)?;
@@ -149,7 +191,56 @@ impl Remote {
             state,
             connections,
             mdns,
+            shared,
+            lan,
+            hotspot_port: if lan { 80 } else { 0 },
+            hotspot: None,
         })
+    }
+
+    /// Sets the port the plain-HTTP listener takes while the Setup hotspot is up: 80 on the LAN,
+    /// a free one otherwise.
+    pub fn with_hotspot_port(mut self, port: u16) -> Self {
+        self.hotspot_port = port;
+        self
+    }
+
+    /// Starts or stops the plain-HTTP listener for phones on the Setup hotspot. Stopping returns
+    /// once the port is closed, idle connections included.
+    pub(crate) fn serve_hotspot(&mut self, on: bool) {
+        if !on {
+            if let Some(listener) = self.hotspot.take() {
+                let _ = listener.stop.send(());
+                let _ = listener.stopped.recv_timeout(std::time::Duration::from_secs(2));
+            }
+        } else if self.hotspot.is_none() {
+            match self.bind_hotspot() {
+                Ok(listener) => self.hotspot = Some(listener),
+                Err(e) => eprintln!("Remote on the Setup hotspot not started: {e}"),
+            }
+        }
+    }
+
+    fn bind_hotspot(&self) -> io::Result<HotspotListener> {
+        let runtime = self.runtime.as_ref().expect("the runtime lives until drop");
+        let bind = if self.lan { Ipv4Addr::UNSPECIFIED } else { Ipv4Addr::LOCALHOST };
+        let listener = TcpListener::bind((bind, self.hotspot_port))?;
+        listener.set_nonblocking(true)?;
+        let app = server::hotspot_router(self.shared.clone());
+        let (stop, stop_rx) = tokio::sync::oneshot::channel::<()>();
+        let (stopped_tx, stopped) = std::sync::mpsc::channel();
+        let _enter = runtime.enter();
+        let listener = tokio::net::TcpListener::from_std(listener)?;
+        runtime.spawn(async move {
+            let serving = axum::serve(listener, app).with_graceful_shutdown(async {
+                let _ = stop_rx.await;
+            });
+            if let Err(e) = serving.await {
+                eprintln!("Remote on the Setup hotspot stopped: {e}");
+            }
+            let _ = stopped_tx.send(());
+        });
+        Ok(HotspotListener { stop, stopped })
     }
 
     /// Where the server listens, as seen from this machine.
@@ -180,7 +271,12 @@ impl Remote {
     /// The link a Pairing QR code carries: the one-time secret and the certificate fingerprint
     /// (for the viewer to compare) ride in the fragment, which a browser never sends to the server.
     pub fn pairing_link(&self, secret: &str) -> String {
-        format!("https://{HOST}:{}/#secret={secret}&fp={}", self.port, self.fingerprint)
+        self.pairing_link_at(HOST, secret)
+    }
+
+    /// The same link for a host other than `m4tv.local`: a TV's new address after it joined a Wi-Fi.
+    pub fn pairing_link_at(&self, host: &str, secret: &str) -> String {
+        format!("https://{host}:{}/#secret={secret}&fp={}", self.port, self.fingerprint)
     }
 
     pub(crate) fn next_command(&mut self) -> Option<Command> {

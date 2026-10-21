@@ -1,3 +1,5 @@
+import type { WifiJoinRequest } from "../protocol/api";
+
 export const UNREACHABLE = "Can't reach the TV";
 
 /** A command the TV refused or could not take. `unpaired` means this phone's token is no good. */
@@ -31,6 +33,7 @@ export function createApi(token: string, fetcher: typeof fetch = fetch) {
     launch: (app: string) => call("POST", "/launch", { app }),
     order: (apps: string[]) => call("PUT", "/apps/order", { apps }),
     text: (text: string) => call("POST", "/text", { text }),
+    join: (request: WifiJoinRequest) => call("POST", "/wifi/join", request),
     setting: (key: string, value: boolean | number) =>
       call("PUT", `/settings/${encodeURIComponent(key)}`, { value }),
   };

@@ -207,6 +207,14 @@ impl Pairings {
         Ok(token)
     }
 
+    /// Pairs a phone with no PIN or secret. Only for the Setup hotspot's listener, where joining
+    /// the WPA2 network with its password is the proof (ADR 0002 amendment).
+    pub fn pair_open(&self, name: &str) -> Result<String, PairError> {
+        let token = random_hex(32);
+        self.0.lock().unwrap().pair(name, token.clone())?;
+        Ok(token)
+    }
+
     /// Starts a secret handshake: a nonce the phone must answer, once.
     pub fn challenge(&self) -> Result<String, PairError> {
         let mut inner = self.0.lock().unwrap();

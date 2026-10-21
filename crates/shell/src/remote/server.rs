@@ -23,6 +23,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post, put},
 };
+use m4tv_os::{JoinRequest, Security};
 use m4tv_settings::{SETTINGS, Value};
 use rust_embed::RustEmbed;
 use serde::Deserialize;
@@ -30,7 +31,7 @@ use serde_json::json;
 use tokio::sync::{mpsc::UnboundedSender, watch};
 use ts_rs::TS;
 
-use super::{Command, LiveState, PairError, Pairings};
+use super::{Command, LiveState, PairError, Pairings, SetupView};
 use crate::shell::Key;
 
 /// How often an open WebSocket checks that its phone is still paired and still there.
@@ -53,6 +54,7 @@ pub(super) struct Shared {
     pub commands: UnboundedSender<Command>,
     pub state: Arc<watch::Sender<LiveState>>,
     pub connections: Arc<AtomicUsize>,
+    pub fingerprint: Arc<str>,
 }
 
 pub(super) fn router(shared: Shared) -> Router {
@@ -63,6 +65,7 @@ pub(super) fn router(shared: Shared) -> Router {
         .route("/apps/order", put(order))
         .route("/text", post(text))
         .route("/settings/{key}", put(setting))
+        .route("/wifi/join", post(join))
         .layer(middleware::from_fn_with_state(shared.clone(), authenticate));
     Router::new()
         .route("/api/pair", post(pair))
@@ -72,6 +75,37 @@ pub(super) fn router(shared: Shared) -> Router {
         .nest("/api", api)
         .fallback_service(get(web))
         .with_state(shared)
+}
+
+/// The router for the Setup hotspot's plain-HTTP listener: the ordinary API, plus the two things
+/// that only make sense there. A phone that has joined the hotspot knows its password, so it can
+/// pair with no PIN and is handed the certificate fingerprint (ADR 0002 amendment).
+pub(super) fn hotspot_router(shared: Shared) -> Router {
+    Router::new()
+        .route("/api/hotspot", get(hotspot_fingerprint))
+        .route("/api/pair/hotspot", post(pair_on_hotspot))
+        .with_state(shared.clone())
+        .merge(router(shared))
+}
+
+async fn hotspot_fingerprint(State(shared): State<Shared>) -> Json<serde_json::Value> {
+    Json(json!({ "fingerprint": &*shared.fingerprint }))
+}
+
+#[derive(Deserialize, TS)]
+struct HotspotPairRequest {
+    #[serde(default)]
+    name: String,
+}
+
+async fn pair_on_hotspot(
+    State(shared): State<Shared>,
+    Json(request): Json<HotspotPairRequest>,
+) -> Response {
+    match shared.pairings.pair_open(&phone_name(&request.name)) {
+        Ok(token) => Json(json!({ "token": token })).into_response(),
+        Err(_) => refuse(StatusCode::INTERNAL_SERVER_ERROR, "could not save the pairing"),
+    }
 }
 
 /// Serves the Remote web app. Its `index.html` is also the landing page for a browser that cannot
@@ -248,6 +282,52 @@ async fn setting(
     send(&shared, Command::Setting(key, request.value))
 }
 
+#[derive(Deserialize, TS)]
+struct WifiJoinRequest {
+    ssid: String,
+    #[serde(default)]
+    password: Option<String>,
+    /// "open", "wpa2" or "wpa3".
+    security: String,
+    hidden: bool,
+}
+
+/// Checks a join request the way the device would need it: a name of 1 to 32 bytes, and a WPA
+/// passphrase of 8 to 63 characters (none for an open network).
+fn valid_join(request: WifiJoinRequest) -> Result<JoinRequest, &'static str> {
+    let security = match request.security.as_str() {
+        "open" => Security::Open,
+        "wpa2" => Security::Wpa2,
+        "wpa3" => Security::Wpa3,
+        _ => return Err("security must be open, wpa2 or wpa3"),
+    };
+    if request.ssid.is_empty() || request.ssid.len() > 32 {
+        return Err("a Wi-Fi name is 1 to 32 bytes");
+    }
+    match (&security, &request.password) {
+        (Security::Open, None) => {}
+        (Security::Open, Some(_)) => return Err("an open network has no password"),
+        (_, Some(password)) if (8..=63).contains(&password.chars().count()) => {}
+        (_, _) => return Err("a WPA password is 8 to 63 characters"),
+    }
+    Ok(JoinRequest {
+        ssid: request.ssid,
+        password: request.password,
+        security,
+        hidden: request.hidden,
+    })
+}
+
+async fn join(State(shared): State<Shared>, Json(request): Json<WifiJoinRequest>) -> Response {
+    if !matches!(shared.state.borrow().setup, SetupView::Hotspot { .. }) {
+        return refuse(StatusCode::CONFLICT, "the TV is not waiting for a Wi-Fi");
+    }
+    match valid_join(request) {
+        Ok(request) => send(&shared, Command::Join(request)),
+        Err(reason) => refuse(StatusCode::BAD_REQUEST, reason),
+    }
+}
+
 #[derive(Deserialize)]
 struct WsQuery {
     token: String,
@@ -322,7 +402,7 @@ mod tests {
     use ts_rs::{Config, TS};
 
     use super::*;
-    use crate::remote::{AppSummary, SettingKind, SettingState};
+    use crate::remote::{AppSummary, SettingKind, SettingState, WifiView};
 
     /// The TypeScript types the Remote web app uses, generated from the Rust ones. Stale types
     /// fail this test; `UPDATE_TS=1 cargo test -p m4tv-shell typescript` rewrites them.
@@ -345,6 +425,10 @@ mod tests {
             SettingState::decl(&cfg),
             SettingKind::decl(&cfg),
             SettingRequest::decl(&cfg),
+            SetupView::decl(&cfg),
+            WifiView::decl(&cfg),
+            WifiJoinRequest::decl(&cfg),
+            HotspotPairRequest::decl(&cfg),
         ] {
             generated += &format!("export {decl}\n\n");
         }

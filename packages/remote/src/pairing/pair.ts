@@ -37,3 +37,8 @@ export async function pairBySecret(post: Post, secret: string, name: string): Pr
 export async function pairByPin(post: Post, pin: string, name: string): Promise<string> {
   return (await ok(post, "/api/pair", { pin, name })).token;
 }
+
+/** Pairs on the Setup hotspot, where joining its WPA2 network with its password is the proof. */
+export async function pairOnHotspot(post: Post, name: string): Promise<string> {
+  return (await ok(post, "/api/pair/hotspot", { name })).token;
+}

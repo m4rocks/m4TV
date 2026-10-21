@@ -2,13 +2,16 @@
 
 use std::time::Duration;
 
-use m4tv_os::Os;
+use m4tv_os::{Hotspot, JoinStatus, Network, Os, Security, WifiNetwork};
 use m4tv_settings::{Kind, SETTINGS, SettingDef, Settings, Value};
 
 use crate::{
     apps::AppDefinition,
     engine::{Engine, Frame},
-    remote::{AppSummary, Command, LiveState, Phone, Remote, SettingKind, SettingState},
+    remote::{
+        AppSummary, Command, LiveState, Phone, Remote, SettingKind, SettingState, SetupView,
+        WifiView,
+    },
 };
 
 /// A TV-remote key. The Dev host keyboard and the Remote both produce these.
@@ -86,6 +89,67 @@ impl Key {
     }
 }
 
+/// The name and password of a new hotspot. People type the password, so it avoids look-alikes.
+fn new_hotspot() -> Hotspot {
+    const ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    let mut random = [0u8; 16];
+    getrandom::fill(&mut random).expect("the OS has randomness");
+    // 256 is a multiple of the alphabet's 32 letters, so the modulo is unbiased.
+    let pick = |bytes: &[u8]| -> String {
+        bytes.iter().map(|b| ALPHABET[*b as usize % ALPHABET.len()] as char).collect()
+    };
+    Hotspot { ssid: format!("m4TV-Setup-{}", pick(&random[..4])), password: pick(&random[4..]) }
+}
+
+/// The text of a Wi-Fi QR code: `WIFI:T:WPA;S:<name>;P:<password>;;`, with its special characters
+/// escaped.
+fn wifi_qr(hotspot: &Hotspot) -> String {
+    let escape = |text: &str| {
+        text.chars().fold(String::new(), |mut out, c| {
+            if "\\;,:\"".contains(c) {
+                out.push('\\');
+            }
+            out.push(c);
+            out
+        })
+    };
+    format!("WIFI:T:WPA;S:{};P:{};;", escape(&hotspot.ssid), escape(&hotspot.password))
+}
+
+fn security_name(security: Security) -> &'static str {
+    match security {
+        Security::Open => "open",
+        Security::Wpa2 => "wpa2",
+        Security::Wpa3 => "wpa3",
+    }
+}
+
+/// The Overlay the Setup flow puts up, if it is running.
+fn setup_overlay(setup: &Setup, remote: &Remote) -> Option<Overlay> {
+    let hotspot_overlay = |hotspot: &Hotspot, status: String| Overlay::Hotspot {
+        ssid: hotspot.ssid.clone(),
+        password: hotspot.password.clone(),
+        payload: wifi_qr(hotspot),
+        status,
+    };
+    match setup {
+        Setup::Off => None,
+        Setup::Hotspot { hotspot, reason, .. } => {
+            Some(hotspot_overlay(hotspot, reason.clone().unwrap_or_default()))
+        }
+        Setup::Joining { hotspot, ssid, .. } => {
+            Some(hotspot_overlay(hotspot, format!("Joining {ssid}...")))
+        }
+        Setup::Joined { address } => {
+            let (_, secret) = remote.pairings().offer();
+            Some(Overlay::Joined {
+                address: address.clone(),
+                payload: remote.pairing_link_at(address, &secret),
+            })
+        }
+    }
+}
+
 /// How long an Overlay stays after the last thing that raised it.
 pub const OVERLAY_TIME: Duration = Duration::from_secs(2);
 
@@ -102,6 +166,47 @@ pub enum Overlay {
         pin: String,
         payload: String,
         cert_replaced: bool,
+    },
+    /// The Setup hotspot: scan `payload` (a Wi-Fi QR code) or type `password` to join `ssid`,
+    /// then open the Remote. `status` says how joining a Wi-Fi is going, or why it failed.
+    Hotspot {
+        ssid: String,
+        password: String,
+        payload: String,
+        status: String,
+    },
+    /// The TV joined a Wi-Fi: scan `payload` to pair at its new `address`.
+    Joined {
+        address: String,
+        payload: String,
+    },
+}
+
+/// How long a join may wait for an address before it counts as failed.
+const JOIN_TIME: Duration = Duration::from_secs(30);
+
+/// Where the Setup hotspot flow is. The hotspot comes up when there is no network (or is asked
+/// for), a phone on it picks a Wi-Fi, and the TV hands over to its new address.
+#[derive(Debug, Clone)]
+enum Setup {
+    Off,
+    Hotspot {
+        hotspot: Hotspot,
+        networks: Vec<WifiNetwork>,
+        /// Why the last join failed.
+        reason: Option<String>,
+        /// Settings asked for it, so a network does not make it go away by itself.
+        on_demand: bool,
+    },
+    Joining {
+        hotspot: Hotspot,
+        ssid: String,
+        waited: Duration,
+        on_demand: bool,
+    },
+    /// Joined: the TV shows its new address until a phone pairs there.
+    Joined {
+        address: String,
     },
 }
 
@@ -120,6 +225,8 @@ pub enum Row {
     Setting(&'static SettingDef),
     /// Shows the Pairing Overlay.
     Pair,
+    /// Brings up the Setup hotspot.
+    Hotspot,
     /// A paired phone; Enter unpairs it.
     Phone(Phone),
     Reboot,
@@ -131,6 +238,7 @@ impl Row {
         match self {
             Row::Setting(def) => def.label.into(),
             Row::Pair => "Pair a phone".into(),
+            Row::Hotspot => "Setup hotspot".into(),
             Row::Phone(phone) => phone.name.clone(),
             Row::Reboot => "Reboot".into(),
             Row::PowerOff => "Power off".into(),
@@ -141,6 +249,7 @@ impl Row {
     pub fn hint(&self) -> &'static str {
         match self {
             Row::Phone(_) => "Enter to unpair",
+            Row::Hotspot => "Enter to start",
             _ => "",
         }
     }
@@ -162,6 +271,7 @@ pub struct Shell {
     pairing_requested: bool,
     /// How many phones were paired when the Shell last looked.
     phones_seen: usize,
+    setup: Setup,
 }
 
 impl Shell {
@@ -180,6 +290,7 @@ impl Shell {
             remote: None,
             pairing_requested: false,
             phones_seen: 0,
+            setup: Setup::Off,
         }
     }
 
@@ -213,6 +324,7 @@ impl Shell {
             .iter()
             .map(Row::Setting)
             .chain(self.remote.iter().map(|_| Row::Pair))
+            .chain(self.remote.iter().map(|_| Row::Hotspot))
             .chain(phones.map(Row::Phone))
             .chain([Row::Reboot, Row::PowerOff])
             .collect()
@@ -246,7 +358,7 @@ impl Shell {
     pub fn tick(&mut self, elapsed: Duration) -> bool {
         let before = self.overlay.clone();
         if let Some((overlay, left)) = &mut self.overlay
-            && !matches!(overlay, Overlay::Pairing { .. })
+            && matches!(overlay, Overlay::Volume { .. })
         {
             *left = left.saturating_sub(elapsed);
             if left.is_zero() {
@@ -254,6 +366,7 @@ impl Shell {
             }
         }
         let commanded = self.run_remote_commands();
+        self.drive_setup(elapsed);
         self.sync_remote();
         commanded || self.overlay != before
     }
@@ -267,6 +380,7 @@ impl Shell {
                 Command::Launch(id) => self.launch(&id),
                 Command::Order(ids) => self.reorder(&ids),
                 Command::Setting(key, value) => self.set(&key, value),
+                Command::Join(request) => self.join(request),
                 Command::Text(text) => {
                     if self.editable_focused() {
                         self.engine.type_text(&text);
@@ -308,8 +422,19 @@ impl Shell {
         let phones = remote.pairings().phones().len();
         if phones > self.phones_seen {
             self.pairing_requested = false;
+            if matches!(self.setup, Setup::Joined { .. }) {
+                self.setup = Setup::Off;
+            }
         }
         self.phones_seen = phones;
+        if let Some(overlay) = setup_overlay(&self.setup, remote) {
+            self.overlay = Some((overlay, Duration::MAX));
+            remote.publish(self.live_state());
+            return;
+        }
+        if matches!(self.overlay, Some((Overlay::Hotspot { .. } | Overlay::Joined { .. }, _))) {
+            self.overlay = None;
+        }
         // Nobody has the Remote open: show how to pair, except over a playing App.
         let wanted = self.pairing_requested
             || (remote.connections() == 0 && !matches!(self.screen, Screen::App(_)));
@@ -346,6 +471,21 @@ impl Shell {
             volume: self.number("volume"),
             muted: self.number("mute") != 0,
             editable: self.editable_focused(),
+            setup: match &self.setup {
+                Setup::Off => SetupView::Off,
+                Setup::Hotspot { networks, reason, .. } => SetupView::Hotspot {
+                    reason: reason.clone(),
+                    networks: networks
+                        .iter()
+                        .map(|n| WifiView {
+                            ssid: n.ssid.clone(),
+                            security: security_name(n.security),
+                        })
+                        .collect(),
+                },
+                Setup::Joining { ssid, .. } => SetupView::Joining { ssid: ssid.clone() },
+                Setup::Joined { address } => SetupView::Joined { address: address.clone() },
+            },
             settings: SETTINGS
                 .iter()
                 .map(|def| SettingState {
@@ -387,6 +527,9 @@ impl Shell {
             self.pairing_requested = false;
             return;
         }
+        if key == Key::Back && self.put_setup_away() {
+            return;
+        }
         match self.screen {
             Screen::Home => self.press_home(key),
             Screen::App(_) => self.press_app(key),
@@ -411,11 +554,113 @@ impl Shell {
             Key::VolumeDown => self.adjust("volume", -1),
             _ => self.adjust("mute", 1),
         }
-        // Pairing is how a phone gets in, so a volume change does not cover it.
-        if !matches!(self.overlay, Some((Overlay::Pairing { .. }, _))) {
+        // Pairing and setup are how a phone gets in, so a volume change does not cover them.
+        if matches!(self.overlay, None | Some((Overlay::Volume { .. }, _))) {
             let overlay =
                 Overlay::Volume { level: self.number("volume"), muted: self.number("mute") != 0 };
             self.overlay = Some((overlay, OVERLAY_TIME));
+        }
+    }
+
+    /// Brings the hotspot up when there is no network, takes it down when there is one, and
+    /// follows a join until it finishes or runs out of time.
+    fn drive_setup(&mut self, elapsed: Duration) {
+        let network = self.os.network();
+        match &mut self.setup {
+            Setup::Off if network == Network::None && self.remote.is_some() => {
+                self.start_hotspot(false)
+            }
+            Setup::Hotspot { on_demand, .. }
+                if network == Network::Ethernet || (network != Network::None && !*on_demand) =>
+            {
+                self.stop_hotspot()
+            }
+            Setup::Joining { waited, .. } => {
+                *waited += elapsed;
+                let timed_out = *waited >= JOIN_TIME;
+                match self.os.join_status() {
+                    JoinStatus::Joined { address } => {
+                        self.stop_hotspot();
+                        self.setup = Setup::Joined { address };
+                    }
+                    JoinStatus::Failed(reason) => self.hotspot_again(reason),
+                    _ if timed_out => self.hotspot_again(format!(
+                        "the network gave no address within {} seconds",
+                        JOIN_TIME.as_secs()
+                    )),
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn start_hotspot(&mut self, on_demand: bool) {
+        let hotspot = new_hotspot();
+        self.os.start_hotspot(&hotspot);
+        if let Some(remote) = &mut self.remote {
+            remote.serve_hotspot(true);
+        }
+        let networks = self.os.scan_wifi();
+        self.setup = Setup::Hotspot { hotspot, networks, reason: None, on_demand };
+    }
+
+    fn stop_hotspot(&mut self) {
+        self.os.stop_hotspot();
+        if let Some(remote) = &mut self.remote {
+            remote.serve_hotspot(false);
+        }
+        self.setup = Setup::Off;
+    }
+
+    /// A join failed: the hotspot comes back, saying why. The phone's listener never went away.
+    fn hotspot_again(&mut self, reason: String) {
+        let (Setup::Joining { hotspot, on_demand, .. } | Setup::Hotspot { hotspot, on_demand, .. }) =
+            std::mem::replace(&mut self.setup, Setup::Off)
+        else {
+            return;
+        };
+        self.os.start_hotspot(&hotspot);
+        let networks = self.os.scan_wifi();
+        self.setup = Setup::Hotspot { hotspot, networks, reason: Some(reason), on_demand };
+    }
+
+    fn join(&mut self, request: m4tv_os::JoinRequest) {
+        let Setup::Hotspot { hotspot, on_demand, .. } = &self.setup else { return };
+        let joining = Setup::Joining {
+            hotspot: hotspot.clone(),
+            ssid: request.ssid.clone(),
+            waited: Duration::ZERO,
+            on_demand: *on_demand,
+        };
+        self.os.join_wifi(&request);
+        self.setup = joining;
+    }
+
+    /// Settings asked for the hotspot. A TV on Ethernet has no use for one.
+    fn ask_for_hotspot(&mut self) {
+        if self.os.network() == Network::Ethernet {
+            self.notice = Some("Ethernet is connected, so there is no Setup hotspot".into());
+        } else if matches!(self.setup, Setup::Off) {
+            self.start_hotspot(true);
+        }
+    }
+
+    /// Back dismisses the handover, or an on-demand hotspot. Returns whether it did.
+    fn put_setup_away(&mut self) -> bool {
+        match self.setup {
+            Setup::Joined { .. } => {
+                self.setup = Setup::Off;
+                if let Some(remote) = &self.remote {
+                    remote.pairings().cancel();
+                }
+                true
+            }
+            Setup::Hotspot { on_demand: true, .. } => {
+                self.stop_hotspot();
+                true
+            }
+            _ => false,
         }
     }
 
@@ -490,6 +735,7 @@ impl Shell {
                     self.adjust(def.key, if key == Key::Left { -1 } else { 1 });
                 }
                 Row::Pair if key == Key::Enter => self.pairing_requested = true,
+                Row::Hotspot if key == Key::Enter => self.ask_for_hotspot(),
                 Row::Phone(phone) if key == Key::Enter => self.revoke(phone.id),
                 Row::Reboot if key == Key::Enter => self.notice = Some(self.os.reboot()),
                 Row::PowerOff if key == Key::Enter => self.notice = Some(self.os.power_off()),

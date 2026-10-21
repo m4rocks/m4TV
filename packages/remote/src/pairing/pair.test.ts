@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { pairByPin, pairBySecret, parseLink, type Post } from "./pair";
+import { pairByPin, pairBySecret, pairOnHotspot, parseLink, type Post } from "./pair";
 import { proof } from "./proofs";
 
 const secret = "000102030405060708090a0b0c0d0e0f";
@@ -48,4 +48,12 @@ test("a refused proof surfaces the TV's reason", async () => {
 test("pairing by PIN yields the token, and a wrong PIN says so", async () => {
   expect(await pairByPin(tv(), "1234", "Pixel")).toBe("t0ken");
   await expect(pairByPin(tv(), "0000", "Pixel")).rejects.toThrow("wrong PIN");
+});
+
+test("on the Setup hotspot a phone pairs with no PIN", async () => {
+  const post: Post = async (path, body: any) =>
+    path === "/api/pair/hotspot" && body.name === "Pixel"
+      ? { status: 200, body: { token: "t0ken" } }
+      : { status: 404, body: {} };
+  expect(await pairOnHotspot(post, "Pixel")).toBe("t0ken");
 });

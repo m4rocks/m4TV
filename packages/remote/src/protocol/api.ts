@@ -27,7 +27,11 @@ editable: boolean,
 /**
  * Every declared setting, in the declaration's order: the Remote builds its screens from this.
  */
-settings: Array<SettingState>, };
+settings: Array<SettingState>, 
+/**
+ * Whether the TV is setting itself up on the Setup hotspot, and how that is going.
+ */
+setup: SetupView, };
 
 export type PairRequest = { pin: string, name: string, };
 
@@ -46,4 +50,20 @@ export type SettingState = { key: string, label: string, kind: SettingKind, valu
 export type SettingKind = { "type": "range", min: number, max: number, step: number, } | { "type": "toggle" };
 
 export type SettingRequest = { value: boolean | number, };
+
+export type SetupView = { "phase": "off" } | { "phase": "hotspot", reason: string | null, networks: Array<WifiView>, } | { "phase": "joining", ssid: string, } | { "phase": "joined", address: string, };
+
+export type WifiView = { ssid: string, 
+/**
+ * "open", "wpa2" or "wpa3".
+ */
+security: string, };
+
+export type WifiJoinRequest = { ssid: string, password: string | null, 
+/**
+ * "open", "wpa2" or "wpa3".
+ */
+security: string, hidden: boolean, };
+
+export type HotspotPairRequest = { name: string, };
 

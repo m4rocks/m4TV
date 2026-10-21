@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { pairByPin, pairBySecret, parseLink, type Post } from "./pairing/pair";
+import { pairByPin, pairBySecret, pairOnHotspot, parseLink, type Post } from "./pairing/pair";
 
 const post: Post = async (path, body) => {
   const response = await fetch(path, {
@@ -32,10 +32,46 @@ export function Pair({ onPaired }: { onPaired: (token: string) => void }) {
     setBusy(false);
   }
 
+  // The Setup hotspot serves the Remote over plain HTTP: joining it with its password is the proof.
+  const onHotspot = location.protocol === "http:";
+  const [fingerprint, setFingerprint] = useState("");
+
   useEffect(() => {
-    // Once, on the scan: a retry is the PIN form below.
+    // Once, on the scan: a retry is the PIN form (or the button on the hotspot) below.
     if (link) void run(pairBySecret(post, link.secret, NAME));
+    else if (onHotspot) {
+      void run(pairOnHotspot(post, NAME));
+      fetch("/api/hotspot")
+        .then((response) => response.json())
+        .then((body) => setFingerprint(body.fingerprint))
+        .catch(() => {});
+    }
   }, []);
+
+  if (onHotspot && !link) {
+    return (
+      <section className="space-y-4">
+        <p>Setting up this TV over its own Wi-Fi.</p>
+        {fingerprint && (
+          <p className="break-all text-sm text-gray-600">
+            Certificate fingerprint, to compare with the TV later: {fingerprint}
+          </p>
+        )}
+        {error && (
+          <p role="alert" className="rounded bg-red-100 p-3 text-red-800">
+            {error}
+          </p>
+        )}
+        <button
+          className="rounded bg-blue-600 px-4 py-3 text-white disabled:opacity-50"
+          disabled={busy}
+          onClick={() => run(pairOnHotspot(post, NAME))}
+        >
+          Pair with this TV
+        </button>
+      </section>
+    );
+  }
 
   return (
     <section className="space-y-4">
